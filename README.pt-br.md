@@ -561,6 +561,10 @@ pros estágios exatos):
 k6 run loadtest/stress-test.js
 ```
 
+Ou pule os passos 1–3 e rode `./loadtest/run.sh` — ele faz tudo isso (sobe a stack, espera o
+RabbitMQ, zera a fila pra uma rodada limpa, sobe a aplicação no profile `loadtest`, espera ficar
+pronta, roda o k6) e derruba a aplicação no final, ou se você der Ctrl+C no meio.
+
 Acompanhe o dashboard do Grafana enquanto roda. Os painéis de p95/p99 do
 `outbox_publish_confirm_seconds` e o de backlog são os que importam — se o backlog continua
 subindo com a latência p95 estável, o limite é o throughput do relay (não o RabbitMQ); se a

@@ -545,6 +545,11 @@ Then, with [k6](https://k6.io/) installed, run the ramping-load scenario in `loa
 k6 run loadtest/stress-test.js
 ```
 
+Or skip steps 1–3 and run `./loadtest/run.sh` — it does all of the above (bring up the stack,
+wait for RabbitMQ, purge the queue for a clean run, start the app on the `loadtest` profile, wait
+for it to be ready, run k6) and shuts the app down again when it's done, or if you Ctrl+C it
+partway through.
+
 Watch the Grafana dashboard while it runs. The `outbox_publish_confirm_seconds` p95/p99 panel and
 the backlog panel are the ones to watch — if backlog keeps climbing while p95 latency is flat,
 the relay's throughput (not RabbitMQ) is the limit; if p95 latency climbs first, the wait for

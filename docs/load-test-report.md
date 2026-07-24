@@ -147,6 +147,10 @@ round 3) to remove the shared-hardware confound entirely.
 
 ## Reproducing this
 
+`./loadtest/run.sh` does the setup below end to end (stack up, queue purged, app started on the
+`loadtest` profile, k6 run, app shut down after) — Ctrl+C at any point still cleans up. Broken out
+manually:
+
 ```bash
 docker compose up -d                                          # RabbitMQ + Prometheus + Grafana
 ./mvnw spring-boot:run -Dspring-boot.run.profiles=loadtest     # fake ViaCEP, real everything else
