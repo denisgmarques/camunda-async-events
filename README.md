@@ -247,11 +247,12 @@ process instances**, so the aggregator emits **two messages**, both stamped with
 process engine itself is using, via `beforeCommit`. If the insert failed, the process's own state
 change would roll back with it.
 
-**5. `afterCompletion` fires once `T2` has committed** and asynchronously kicks `OutboxRelay`. It
-picks up every `PENDING` row (a scheduled sweep does the same every 5 seconds as a safety net —
-covers the case where the app crashed before the async kick ran), publishes each one to the
-`camunda.events` exchange with the process definition key as routing key, and only flips the row
-to `SENT` after RabbitMQ **confirms** the publish.
+**5. `afterCompletion` fires once `T2` has committed** and asynchronously kicks `OutboxRelay` with
+the exact two row ids just written — no query, just what this transaction produced (a scheduled
+sweep separately re-checks every `PENDING` row every 5 seconds as a safety net, in case the app
+crashed before the async kick ran). Each id gets published to the `camunda.events` exchange with
+the process definition key as routing key, and only flips to `SENT` after RabbitMQ **confirms**
+the publish.
 
 **6. `CamundaEventsRabbitConsumer` consumes both messages.** For each one it computes the idempotency key
 `(transactionId, processInstanceId)`, checks `processed_transaction`, and — since neither pair has
@@ -494,15 +495,20 @@ more than it does.
   `outbox_message` and the consumer's `processed_transaction`) is the right backend for this
   pattern — that's the whole point of Transactional Outbox — but the *current relay code* assumes
   a single writer:
-  - `OutboxRelay.relayPendingMessages()` is `synchronized`, which only serializes the scheduled
-    sweep against the post-commit async trigger **within one JVM**. Run two instances of this app
-    and both will poll `PENDING` rows and race to publish the same ones — not incorrect
-    end-to-end (the consumer is idempotent) but wasteful, and it doesn't get you more throughput
-    by scaling out.
-  - `findByStatusOrderById(PENDING)` has no `LIMIT`/pagination — every relay cycle loads *all*
-    pending rows into memory. Fine at demo volume; a real backlog (e.g. after a broker outage)
-    needs batching.
-  - Getting to real multi-instance horizontal scaling means row-level claiming (e.g.
+  - The low-latency path (`OutboxRelay.triggerAsync(List<Long>)`) publishes **only the ids the
+    transaction that just committed produced** — it's handed the exact list from the in-memory
+    `TransactionSynchronization` that wrote them, not a query. Run two instances and neither
+    touches a row the other one wrote on this path — no cross-instance race on the common case
+    (broker healthy, nothing crashed).
+  - `OutboxRelay.relayPendingMessages()`, the scheduled sweep, still has to query broadly
+    (`findByStatusOrderById(PENDING)`, no origin filter) — that's the only way a surviving
+    instance can rescue a row an instance that crashed mid-flight never got to publish. Run two
+    instances and the sweep in both can pick up the same orphaned row at the same time — not
+    incorrect end-to-end (the consumer is idempotent) but wasteful, and it's a real race the
+    `synchronized` keyword only closes **within one JVM**, not across instances.
+  - That same sweep query has no `LIMIT`/pagination — every cycle loads *all* pending rows into
+    memory. Fine at demo volume; a real backlog (e.g. after a broker outage) needs batching.
+  - Getting the sweep to real multi-instance horizontal scaling means row-level claiming (e.g.
     `SELECT ... FOR UPDATE SKIP LOCKED`) instead of the current `synchronized` method, plus a
     bounded, indexed query.
 - **No schema migrations, no index tuning.** `spring.jpa.hibernate.ddl-auto=update` against H2

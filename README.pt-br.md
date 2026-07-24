@@ -255,10 +255,11 @@ conexão que o próprio engine de processos está usando, via `beforeCommit`. Se
 própria mudança de estado do processo desfaria junto.
 
 **5. `afterCompletion` dispara assim que `T2` é commitada** e aciona o `OutboxRelay` de forma
-assíncrona. Ele pega toda linha `PENDING` (uma varredura agendada faz o mesmo a cada 5 segundos
-como rede de segurança — cobre o caso em que a aplicação caiu antes do disparo assíncrono rodar),
-publica cada uma no exchange `camunda.events` usando a chave do processo como routing key, e só
-marca a linha como `SENT` depois que o RabbitMQ **confirma** a publicação.
+assíncrona, passando exatamente os dois ids de linha que acabou de escrever — sem query, só o que
+essa transação produziu (uma varredura agendada, separada, reconfere toda linha `PENDING` a cada 5
+segundos como rede de segurança, pro caso da aplicação ter caído antes do disparo assíncrono
+rodar). Cada id é publicado no exchange `camunda.events` usando a chave do processo como routing
+key, e só é marcado como `SENT` depois que o RabbitMQ **confirma** a publicação.
 
 **6. O `CamundaEventsRabbitConsumer` consome as duas mensagens.** Para cada uma ele calcula a chave de
 idempotência `(transactionId, processInstanceId)`, checa `processed_transaction`, e — como nenhum
@@ -506,17 +507,24 @@ sugerir mais do que de fato entrega.
   outbox (tanto `outbox_message` quanto o `processed_transaction` do consumidor) é o backend certo
   pra esse padrão — esse é o ponto inteiro do Transactional Outbox — mas o *código do relay atual*
   assume um único escritor:
-  - `OutboxRelay.relayPendingMessages()` é `synchronized`, o que só serializa a varredura agendada
-    contra o disparo assíncrono pós-commit **dentro de uma mesma JVM**. Suba duas instâncias desta
-    aplicação e as duas vão fazer polling nas linhas `PENDING` e disputar a publicação das mesmas
-    linhas — não incorreto de ponta a ponta (o consumidor é idempotente), mas desperdiçado, e não
-    ganha throughput escalando horizontalmente.
-  - `findByStatusOrderById(PENDING)` não tem `LIMIT`/paginação — cada ciclo do relay carrega
-    *todas* as linhas pendentes pra memória. Tranquilo no volume da demo; um backlog real
-    (ex.: depois de uma queda do broker) precisa de lotes.
-  - Chegar a um escalonamento horizontal multi-instância de verdade exige captura em nível de
-    linha (ex.: `SELECT ... FOR UPDATE SKIP LOCKED`) no lugar do método `synchronized` atual, mais
-    uma query limitada e indexada.
+  - O caminho de baixa latência (`OutboxRelay.triggerAsync(List<Long>)`) publica **só os ids que a
+    própria transação recém-commitada produziu** — recebe a lista exata da
+    `TransactionSynchronization` em memória que os escreveu, não faz uma query. Suba duas
+    instâncias e nenhuma mexe numa linha que a outra escreveu por esse caminho — sem corrida entre
+    instâncias no caso comum (broker saudável, nada caiu).
+  - `OutboxRelay.relayPendingMessages()`, a varredura agendada, ainda precisa consultar de forma
+    ampla (`findByStatusOrderById(PENDING)`, sem filtro de origem) — é o único jeito de uma
+    instância sobrevivente resgatar uma linha que outra instância, ao cair no meio do caminho,
+    nunca chegou a publicar. Suba duas instâncias e a varredura das duas pode pegar a mesma linha
+    órfã ao mesmo tempo — não incorreto de ponta a ponta (o consumidor é idempotente), mas
+    desperdiçado, e é uma corrida real que o `synchronized` só fecha **dentro de uma mesma JVM**,
+    não entre instâncias.
+  - Essa mesma query da varredura não tem `LIMIT`/paginação — cada ciclo carrega *todas* as linhas
+    pendentes pra memória. Tranquilo no volume da demo; um backlog real (ex.: depois de uma queda
+    do broker) precisa de lotes.
+  - Levar a varredura a um escalonamento horizontal multi-instância de verdade exige captura em
+    nível de linha (ex.: `SELECT ... FOR UPDATE SKIP LOCKED`) no lugar do método `synchronized`
+    atual, mais uma query limitada e indexada.
 - **Sem migração de schema, sem ajuste de índice.** `spring.jpa.hibernate.ddl-auto=update` contra
   H2 em memória é conveniente pra uma demo que reseta a cada execução; um deploy real precisa de
   Flyway/Liquibase e um índice explícito em `outbox_message.status` (a query de hoje degradaria
