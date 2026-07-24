@@ -251,9 +251,12 @@ change would roll back with it.
 
 **5. `afterCompletion` fires once `T2` has committed** and asynchronously kicks `OutboxRelay` with
 the exact two rows just written (the actual entities, no query — just what this transaction
-produced). A scheduled sweep separately re-checks every row still sitting in `outbox_message`
-every 5 seconds as a safety net, in case the app crashed before the async kick ran. Each message
-gets published to the `camunda.events` exchange with the process definition key as routing key,
+produced). A scheduled sweep separately re-checks `outbox_message` every 5 seconds as a safety
+net, in case the app crashed before the async kick ran — but only for rows older than
+`camunda.events.rabbitmq.relay-min-age` (15s by default): the low-latency path normally clears a
+row within milliseconds, so there's no reason for the sweep to even look at one that young; it
+would almost always just be racing the path that's already handling it. Each message gets
+published to the `camunda.events` exchange with the process definition key as routing key,
 and its row is only **deleted** after RabbitMQ **confirms** the publish — there's no status flag,
 being in the table at all means still pending.
 
@@ -348,7 +351,7 @@ just durable queues and exchanges (see `RabbitMQTopologyConfig`):
 | Pattern | Where |
 |---|---|
 | **Transactional Outbox** | `outbox_message` table, written in the same DB transaction as the Camunda command (`HistoryEventTransactionSynchronization`) |
-| **Polling Publisher** (+ low-latency trigger) | `OutboxRelay` — scheduled sweep every 5s, plus an async kick right after commit |
+| **Polling Publisher** (+ low-latency trigger) | `OutboxRelay` — scheduled sweep every 5s (only rows older than `relay-min-age`), plus an async kick right after commit |
 | **Idempotent Consumer** | `CamundaEventsRabbitConsumer` + `processed_transaction`, keyed by `(transactionId, processInstanceId)` |
 | **Retry with backoff + Dead Letter Queue** | RabbitMQ TTL/DLX bounce topology, `x-death`-based attempt counting |
 | **BPMN Boundary Error Event retry loop** (business-level retry) | `consultaCepProcess` — a business-visible, independently-timed retry, deliberately decoupled from Camunda's technical job retry |
@@ -508,28 +511,35 @@ more than it does.
     the row afterward is a targeted `DELETE ... WHERE id = ?`, not a read-then-delete). Run two
     instances and neither touches a row the other one wrote on this path — no cross-instance race
     on the common case (broker healthy, nothing crashed).
-  - `OutboxRelay.relayPendingMessages()`, the scheduled sweep, still has to query broadly
-    (`findAllByOrderById()`, no origin filter, no status to filter by since there isn't one) —
-    that's the only way a surviving instance can rescue a row an instance that crashed mid-flight
-    never got to publish. Run two instances (or even just the sweep racing the low-latency path
-    for the same freshly-committed row *within* one instance) and both can try to publish the
-    same row at the same time — not incorrect end-to-end (the consumer is idempotent, and the
-    delete that follows is a plain `DELETE ... WHERE id = ?` that no-ops harmlessly if the row is
-    already gone) but wasteful. Deliberately left unguarded, even within a single JVM: a lock here
-    would have to wrap the RabbitMQ publish-confirm wait itself, serializing every commit's publish
-    behind whatever else happens to be publishing at that moment — a bigger cost than the rare
-    duplicate it would prevent, especially since that same duplicate is already tolerated,
-    unguarded, across instances.
-  - That same sweep query has no `LIMIT`/pagination — every cycle loads *all* remaining rows into
-    memory. Fine at demo volume; a real backlog (e.g. after a broker outage) needs batching.
+  - `OutboxRelay.relayPendingMessages()`, the scheduled sweep, still has to query broadly (no
+    origin filter, no status to filter by since there isn't one) — that's the only way a
+    surviving instance can rescue a row an instance that crashed mid-flight never got to publish.
+    It does skip rows younger than `relay-min-age` (15s by default), which makes the sweep racing
+    the low-latency path for the *same freshly-committed row* rare in practice — but rare isn't
+    never (a slow broker can keep the low-latency path in flight past that threshold). Run two
+    instances, or hit that narrow window within one, and both can try to publish the same row at
+    the same time — not incorrect end-to-end (the consumer is idempotent) but wasteful. The
+    delete that follows uses the overridden bulk `deleteById` (`DELETE ... WHERE id = ?`, no
+    affected-row check) specifically so that losing this race is a silent no-op instead of an
+    exception — the default entity-based `delete()` from Spring Data throws
+    `OptimisticLockException` in exactly this situation, which was a real bug here until a test
+    (`OutboxMessageRepositoryDeleteRaceTest`) caught it. Deliberately left unguarded by a lock,
+    even within a single JVM: a lock here would have to wrap the RabbitMQ publish-confirm wait
+    itself, serializing every commit's publish behind whatever else happens to be publishing at
+    that moment — a bigger cost than the rare duplicate it would prevent, especially since that
+    same duplicate is already tolerated, unguarded, across instances.
+  - That same sweep query has no `LIMIT`/pagination — every cycle loads *all* remaining eligible
+    rows into memory. Fine at demo volume; a real backlog (e.g. after a broker outage) needs
+    batching.
   - Getting the sweep to real multi-instance horizontal scaling means row-level claiming (e.g.
     `SELECT ... FOR UPDATE SKIP LOCKED`) instead of the current unguarded read, plus a bounded
     query.
 - **No schema migrations.** `spring.jpa.hibernate.ddl-auto=update` against H2 in-memory is
-  convenient for a demo that resets on every run; a real deployment needs Flyway/Liquibase.
-  (`outbox_message` doesn't need an extra index for the sweep's query — it just orders by the
-  primary key, already indexed by definition — since there's no status column to filter by:
-  a confirmed row is deleted, not flagged, so every remaining row is implicitly pending.)
+  convenient for a demo that resets on every run; a real deployment needs Flyway/Liquibase — and,
+  at real volume, an index on `outbox_message.created_at`, since the sweep now filters on it
+  (`findByCreatedAtBeforeOrderById`) instead of just ordering by the primary key. (There's still
+  no status column to index or filter by: a confirmed row is deleted, not flagged, so every
+  remaining row is implicitly pending.)
 - **No retention/archiving policy for `processed_transaction`.** `outbox_message` is self-pruning
   now — a row only exists while pending, and is deleted the moment it's confirmed sent — but the
   consumer's idempotency table has no such cleanup: every `(transactionId, processInstanceId)`

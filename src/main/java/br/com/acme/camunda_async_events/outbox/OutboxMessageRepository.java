@@ -5,12 +5,17 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.Instant;
 import java.util.List;
 
 public interface OutboxMessageRepository extends JpaRepository<OutboxMessage, Long> {
 
-	/** Não existe mais filtro por status: toda linha que existe aqui está, por definição, pendente. */
-	List<OutboxMessage> findAllByOrderById();
+	/**
+	 * Não existe mais filtro por status: toda linha que existe aqui está, por definição,
+	 * pendente. Filtra por idade (ver {@code camunda.events.rabbitmq.relay-min-age}) pra a
+	 * varredura agendada não disputar linha recém-escrita com o caminho de baixa latência.
+	 */
+	List<OutboxMessage> findByCreatedAtBeforeOrderById(Instant threshold);
 
 	/**
 	 * Sobrescreve {@link JpaRepository#deleteById(Object)} para ser um DELETE puro, sem SELECT

@@ -258,11 +258,15 @@ própria mudança de estado do processo desfaria junto.
 
 **5. `afterCompletion` dispara assim que `T2` é commitada** e aciona o `OutboxRelay` de forma
 assíncrona, passando exatamente as duas linhas que acabou de escrever (as entidades de verdade,
-sem query — só o que essa transação produziu). Uma varredura agendada, separada, reconfere toda
-linha que ainda sobrar em `outbox_message` a cada 5 segundos como rede de segurança, pro caso da
-aplicação ter caído antes do disparo assíncrono rodar. Cada mensagem é publicada no exchange
-`camunda.events` usando a chave do processo como routing key, e sua linha só é **apagada** depois
-que o RabbitMQ **confirma** a publicação — não existe flag de status, estar na tabela já significa
+sem query — só o que essa transação produziu). Uma varredura agendada, separada, reconfere
+`outbox_message` a cada 5 segundos como rede de segurança, pro caso da aplicação ter caído antes
+do disparo assíncrono rodar — mas só considera linhas mais velhas que
+`camunda.events.rabbitmq.relay-min-age` (15s por padrão): o caminho de baixa latência normalmente
+resolve uma linha em milissegundos, então não há motivo pra varredura sequer olhar pra uma linha
+tão nova assim; na prática, ela quase sempre estaria só disputando a linha com quem já está
+cuidando dela. Cada mensagem é publicada no exchange `camunda.events` usando a chave do processo
+como routing key, e sua linha só é **apagada** depois que o RabbitMQ **confirma** a publicação —
+não existe flag de status, estar na tabela já significa
 pendente.
 
 **6. O `CamundaEventsRabbitConsumer` consome as duas mensagens.** Para cada uma ele calcula a chave de
@@ -358,7 +362,7 @@ nenhum plugin do RabbitMQ, só filas e exchanges duráveis (veja `RabbitMQTopolo
 | Padrão | Onde |
 |---|---|
 | **Transactional Outbox** | Tabela `outbox_message`, gravada na mesma transação de banco do comando do Camunda (`HistoryEventTransactionSynchronization`) |
-| **Polling Publisher** (+ disparo de baixa latência) | `OutboxRelay` — varredura agendada a cada 5s, mais um disparo assíncrono logo após o commit |
+| **Polling Publisher** (+ disparo de baixa latência) | `OutboxRelay` — varredura agendada a cada 5s (só linhas mais velhas que `relay-min-age`), mais um disparo assíncrono logo após o commit |
 | **Idempotent Consumer** | `CamundaEventsRabbitConsumer` + `processed_transaction`, chaveado por `(transactionId, processInstanceId)` |
 | **Retry com backoff + Dead Letter Queue** | Topologia de ricochete TTL/DLX do RabbitMQ, contagem de tentativas baseada em `x-death` |
 | **Loop de retentativa via Boundary Error Event do BPMN** (retentativa em nível de negócio) | `consultaCepProcess` — uma retentativa visível ao negócio, com cadência própria, deliberadamente desacoplada do retry técnico de job do Camunda |
@@ -522,30 +526,35 @@ sugerir mais do que de fato entrega.
     nenhuma mexe numa linha que a outra escreveu por esse caminho — sem corrida entre instâncias
     no caso comum (broker saudável, nada caiu).
   - `OutboxRelay.relayPendingMessages()`, a varredura agendada, ainda precisa consultar de forma
-    ampla (`findAllByOrderById()`, sem filtro de origem, sem status pra filtrar porque não existe
-    mais um) — é o único jeito de uma instância sobrevivente resgatar uma linha que outra
-    instância, ao cair no meio do caminho, nunca chegou a publicar. Suba duas instâncias (ou até
-    só a varredura correndo contra o caminho de baixa latência da mesma linha recém-commitada,
-    **dentro** de uma única instância) e as duas podem tentar publicar a mesma linha ao mesmo
-    tempo — não incorreto de ponta a ponta (o consumidor é idempotente, e o delete que vem depois
-    é um `DELETE ... WHERE id = ?` que não faz nada se a linha já sumiu), mas desperdiçado.
-    Deixado sem lock de propósito, mesmo dentro de uma única JVM: um lock aqui teria que envolver
-    a própria espera pelo publisher-confirm do RabbitMQ, serializando o publish de todo commit
-    atrás de qualquer outra publicação em andamento — um custo maior que a duplicata rara que
-    evitaria, ainda mais porque essa mesma duplicata já é tolerada, sem lock nenhum, entre
+    ampla (sem filtro de origem, sem status pra filtrar porque não existe mais um) — é o único
+    jeito de uma instância sobrevivente resgatar uma linha que outra instância, ao cair no meio do
+    caminho, nunca chegou a publicar. Ela pula linhas mais novas que `relay-min-age` (15s por
+    padrão), o que torna rara, na prática, a corrida contra o caminho de baixa latência pela
+    *mesma* linha recém-commitada — mas rara não é nunca (um broker lento pode manter o caminho
+    rápido em andamento além desse limiar). Suba duas instâncias, ou caia nessa janela estreita
+    dentro de uma só, e as duas podem tentar publicar a mesma linha ao mesmo tempo — não incorreto
+    de ponta a ponta (o consumidor é idempotente), mas desperdiçado. O delete que vem depois usa o
+    `deleteById` sobrescrito em bulk (`DELETE ... WHERE id = ?`, sem checagem de linhas afetadas)
+    de propósito, pra que perder essa corrida seja um no-op silencioso em vez de uma exceção — o
+    `delete()` por entidade padrão do Spring Data lança `OptimisticLockException` exatamente nessa
+    situação, o que foi um bug real aqui até um teste (`OutboxMessageRepositoryDeleteRaceTest`)
+    pegar. Deixado sem lock de propósito, mesmo dentro de uma única JVM: um lock aqui teria que
+    envolver a própria espera pelo publisher-confirm do RabbitMQ, serializando o publish de todo
+    commit atrás de qualquer outra publicação em andamento — um custo maior que a duplicata rara
+    que evitaria, ainda mais porque essa mesma duplicata já é tolerada, sem lock nenhum, entre
     instâncias.
   - Essa mesma query da varredura não tem `LIMIT`/paginação — cada ciclo carrega *todas* as linhas
-    que sobrarem pra memória. Tranquilo no volume da demo; um backlog real (ex.: depois de uma
-    queda do broker) precisa de lotes.
+    elegíveis que sobrarem pra memória. Tranquilo no volume da demo; um backlog real (ex.: depois
+    de uma queda do broker) precisa de lotes.
   - Levar a varredura a um escalonamento horizontal multi-instância de verdade exige captura em
     nível de linha (ex.: `SELECT ... FOR UPDATE SKIP LOCKED`) no lugar da leitura sem lock atual,
     mais uma query limitada.
 - **Sem migração de schema.** `spring.jpa.hibernate.ddl-auto=update` contra H2 em memória é
-  conveniente pra uma demo que reseta a cada execução; um deploy real precisa de Flyway/Liquibase.
-  (`outbox_message` não precisa de um índice extra pra query da varredura — ela só ordena pela
-  chave primária, já indexada por definição — porque não existe coluna de status pra filtrar: uma
-  linha confirmada é apagada, não marcada, então toda linha que sobra já é, implicitamente,
-  pendente.)
+  conveniente pra uma demo que reseta a cada execução; um deploy real precisa de Flyway/Liquibase
+  — e, em volume real, um índice em `outbox_message.created_at`, já que a varredura agora filtra
+  por ele (`findByCreatedAtBeforeOrderById`) em vez de só ordenar pela chave primária. (Continua
+  sem coluna de status pra indexar ou filtrar: uma linha confirmada é apagada, não marcada, então
+  toda linha que sobra já é, implicitamente, pendente.)
 - **Sem política de retenção/arquivamento pro `processed_transaction`.** `outbox_message` já se
   autolimpa agora — uma linha só existe enquanto pendente, e é apagada no instante em que é
   confirmada — mas a tabela de idempotência do consumidor não tem essa limpeza: todo par
