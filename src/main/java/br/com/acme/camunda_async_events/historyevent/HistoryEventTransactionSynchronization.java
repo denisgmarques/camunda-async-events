@@ -51,6 +51,9 @@ class HistoryEventTransactionSynchronization implements TransactionSynchronizati
 		}
 
 		HistoryEventAggregator.aggregate(events, transactionId).forEach(this::saveToOutbox);
+		// Já extraímos tudo que interessa (agregado e persistido); solta as referências aos
+		// HistoryEvent brutos em vez de esperar o objeto inteiro morrer no afterCompletion.
+		events.clear();
 	}
 
 	@Override

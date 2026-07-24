@@ -2,10 +2,10 @@ package br.com.acme.camunda_async_events;
 
 import br.com.acme.camunda_async_events.consumer.ProcessedTransactionId;
 import br.com.acme.camunda_async_events.consumer.ProcessedTransactionRepository;
-import br.com.acme.camunda_async_events.outbox.OutboxMessage;
 import br.com.acme.camunda_async_events.outbox.OutboxMessageRepository;
-import br.com.acme.camunda_async_events.outbox.OutboxStatus;
 import br.com.acme.camunda_async_events.rabbitmq.CamundaEventsRabbitProperties;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.camunda.bpm.engine.HistoryService;
 import org.camunda.bpm.engine.RuntimeService;
@@ -14,7 +14,12 @@ import org.camunda.bpm.engine.history.HistoricProcessInstance;
 import org.camunda.bpm.engine.runtime.ProcessInstance;
 import org.camunda.bpm.engine.task.Task;
 import org.junit.jupiter.api.Test;
-import org.springframework.amqp.core.MessageProperties;
+import org.springframework.amqp.core.Binding;
+import org.springframework.amqp.core.BindingBuilder;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.TopicExchange;
+import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -24,6 +29,8 @@ import org.testcontainers.containers.RabbitMQContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -81,10 +88,27 @@ class CamundaAsyncEventsEndToEndIT {
 	private RabbitTemplate rabbitTemplate;
 
 	@Autowired
+	private RabbitAdmin rabbitAdmin;
+
+	@Autowired
 	private CamundaEventsRabbitProperties rabbitmqProperties;
+
+	@Autowired
+	private ObjectMapper objectMapper;
 
 	@Test
 	void capturesRelaysAndConsumesEventsForBothParentAndChildProcessInstances() {
+		log.info("=== 0) abrindo uma fila auxiliar ligada no mesmo exchange (\"#\"), so pra capturar uma "
+				+ "copia crua de cada mensagem publicada - nao depende da linha do outbox sobreviver ao "
+				+ "envio, ja que ela e apagada assim que o RabbitMQ confirma ===");
+		// autoDelete=false de propósito: com autoDelete=true a fila some assim que o primeiro
+		// receive() cancela seu consumidor interno, e o passo 4 faz varias chamadas em sequencia.
+		// Sem problema deixar sobrar - e um RabbitMQ descartavel do Testcontainers, o container
+		// inteiro morre no fim do teste.
+		Queue captureQueue = new Queue("camunda.events.test-capture.queue", false, false, false);
+		rabbitAdmin.declareQueue(captureQueue);
+		rabbitAdmin.declareBinding(captureBinding(captureQueue));
+
 		log.info("=== 1) iniciando cadastroClienteProcess (nome, cpf, cep) ===");
 		ProcessInstance parent = runtimeService.startProcessInstanceByKey("cadastroClienteProcess", Map.of(
 				"nome", "Teste End-to-End",
@@ -120,27 +144,24 @@ class CamundaAsyncEventsEndToEndIT {
 		});
 		log.info("confirmado: processed_transaction tem registro para o pai E para o filho");
 
-		await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
-			List<OutboxMessage> pending = outboxMessageRepository.findByStatusOrderById(OutboxStatus.PENDING);
-			assertThat(pending).as("outbox nao deveria ter nada PENDING depois do publisher-confirm").isEmpty();
-		});
-		log.info("confirmado: nenhuma linha PENDING sobrou no outbox (tudo foi confirmado pelo broker)");
+		await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+				assertThat(outboxMessageRepository.findAll())
+						.as("outbox deveria estar vazio depois do publisher-confirm - cada linha e apagada "
+								+ "assim que confirmada, entao 'nao existir mais' e o sinal de sucesso")
+						.isEmpty());
+		log.info("confirmado: outbox esvaziou (tudo foi confirmado pelo broker e apagado)");
 
-		log.info("=== 4) reenviando manualmente a MESMA mensagem do filho para provar a idempotencia ===");
-		OutboxMessage childMessage = outboxMessageRepository.findAll().stream()
-				.filter(m -> m.getProcessInstanceId().equals(child.getId()))
-				.findFirst()
-				.orElseThrow();
+		log.info("=== 4) pegando a copia crua da mensagem do filho na fila auxiliar e reenviando "
+				+ "manualmente para provar a idempotencia ===");
+		Message childRawMessage = findCapturedMessageForProcessInstance(captureQueue.getName(), child.getId());
+		JsonNode childPayload = readPayload(childRawMessage);
 		long processedCountBefore = processedTransactionRepository.count();
 
-		rabbitTemplate.convertAndSend(rabbitmqProperties.getExchange(), childMessage.getProcessDefinitionKey(),
-				childMessage.getPayload(), message -> {
-					message.getMessageProperties().setContentType(MessageProperties.CONTENT_TYPE_JSON);
-					return message;
-				});
+		rabbitTemplate.send(rabbitmqProperties.getExchange(),
+				childRawMessage.getMessageProperties().getReceivedRoutingKey(), childRawMessage);
 
-		boolean reprocessedAsDuplicate = processedTransactionRepository
-				.existsById(new ProcessedTransactionId(childMessage.getTransactionId(), childMessage.getProcessInstanceId()));
+		boolean reprocessedAsDuplicate = processedTransactionRepository.existsById(new ProcessedTransactionId(
+				childPayload.get("transactionId").asText(), childPayload.get("processInstanceId").asText()));
 		assertThat(reprocessedAsDuplicate).isTrue();
 
 		await().pollDelay(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(10)).untilAsserted(() ->
@@ -151,5 +172,33 @@ class CamundaAsyncEventsEndToEndIT {
 				+ "(continua em {} registro(s))", processedCountBefore);
 
 		log.info("=== fim: outbox -> RabbitMQ -> consumer -> idempotencia validados de ponta a ponta ===");
+	}
+
+	private Binding captureBinding(Queue captureQueue) {
+		return BindingBuilder.bind(captureQueue).to(new TopicExchange(rabbitmqProperties.getExchange())).with("#");
+	}
+
+	/** Drena a fila de captura até achar a mensagem cujo {@code processInstanceId} bate com o esperado. */
+	private Message findCapturedMessageForProcessInstance(String queueName, String processInstanceId) {
+		for (int attempt = 0; attempt < 5; attempt++) {
+			Message message = rabbitTemplate.receive(queueName, 3000);
+			if (message == null) {
+				break;
+			}
+			if (processInstanceId.equals(readPayload(message).path("processInstanceId").asText(null))) {
+				return message;
+			}
+		}
+		throw new IllegalStateException(
+				"Mensagem capturada para processInstanceId=" + processInstanceId + " nao encontrada");
+	}
+
+	private JsonNode readPayload(Message message) {
+		try {
+			return objectMapper.readTree(message.getBody());
+		}
+		catch (IOException e) {
+			throw new UncheckedIOException(e);
+		}
 	}
 }

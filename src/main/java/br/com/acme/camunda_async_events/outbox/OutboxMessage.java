@@ -2,8 +2,6 @@ package br.com.acme.camunda_async_events.outbox;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
-import jakarta.persistence.EnumType;
-import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -16,11 +14,13 @@ import lombok.Setter;
 import java.time.Instant;
 
 /**
- * Registro da tabela outbox: cada linha é uma mensagem de evento de processo que precisa
- * ser publicada no RabbitMQ. É gravada na MESMA transação/conexão do Camunda (ver
+ * Registro da tabela outbox: cada linha é uma mensagem de evento de processo que ainda
+ * precisa ser publicada no RabbitMQ. É gravada na MESMA transação/conexão do Camunda (ver
  * {@link br.com.acme.camunda_async_events.historyevent.HistoryEventTransactionSynchronization}),
  * garantindo que o evento nunca se perca mesmo que o broker esteja indisponível no momento do
- * commit: o {@link OutboxRelay} republica tudo que ainda estiver PENDING.
+ * commit: o {@link OutboxRelay} republica tudo que ainda estiver aqui. Não existe uma coluna
+ * de status "enviado" — a linha é apagada assim que o RabbitMQ confirma o recebimento, então
+ * "existir na tabela" já é o único estado que importa (pendente).
  */
 @Entity
 @Table(name = "outbox_message")
@@ -45,10 +45,6 @@ public class OutboxMessage {
 	@Lob
 	@Column(name = "payload", nullable = false, updatable = false)
 	private String payload;
-
-	@Enumerated(EnumType.STRING)
-	@Column(name = "status", nullable = false)
-	private OutboxStatus status = OutboxStatus.PENDING;
 
 	@Column(name = "created_at", nullable = false, updatable = false)
 	private Instant createdAt = Instant.now();

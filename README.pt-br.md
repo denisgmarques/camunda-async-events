@@ -68,8 +68,9 @@ diretamente ao ciclo de vida da própria transação do Camunda:
   avisado, nem o contrário.
 - Só **depois** que a transação realmente foi commitada é que algo tenta falar com o RabbitMQ. Um
   relay em segundo plano (com um "empurrão" de baixa latência logo após o commit, mais uma
-  varredura periódica de segurança) publica as linhas pendentes e só as marca como `SENT` depois
-  que o RabbitMQ **confirma** o recebimento.
+  varredura periódica de segurança) publica as linhas pendentes e só **apaga** cada uma depois
+  que o RabbitMQ **confirma** o recebimento — não existe status "enviado" pra controlar: a linha
+  só estar na tabela já significa que ainda está pendente.
 - Do lado de quem recebe, o RabbitMQ está configurado com uma topologia real de
   retry-com-backoff-depois-DLQ (5 tentativas, 10 segundos entre elas, sem precisar de plugins), e o
   consumidor é **idempotente**: toda mensagem carrega o id da transação (e da instância de
@@ -86,8 +87,9 @@ mockada num teste unitário:
 - ✅ O evento e a mudança de estado do processo realmente caem na mesma transação de banco
   (verificado fazendo a escrita no outbox falhar e confirmando que a transação do processo também
   desfaz junto).
-- ✅ Uma mensagem publicada no RabbitMQ só é marcada como `SENT` depois de uma **confirmação do
-  publisher** — se o broker nunca confirma, a linha continua `PENDING` e é retentada pelo relay.
+- ✅ Uma mensagem publicada no RabbitMQ só é apagada do outbox depois de uma **confirmação do
+  publisher** — se o broker nunca confirma, a linha continua exatamente onde está e é retentada
+  pelo relay.
 - ✅ Uma reentrega genuinamente duplicada (mesmo id de transação, mesmo id de instância de
   processo) é ignorada silenciosa e corretamente pelo consumidor.
 - ✅ Uma sub-instância de **CallActivity** pode compartilhar uma transação de banco com o processo
@@ -255,11 +257,13 @@ conexão que o próprio engine de processos está usando, via `beforeCommit`. Se
 própria mudança de estado do processo desfaria junto.
 
 **5. `afterCompletion` dispara assim que `T2` é commitada** e aciona o `OutboxRelay` de forma
-assíncrona, passando exatamente os dois ids de linha que acabou de escrever — sem query, só o que
-essa transação produziu (uma varredura agendada, separada, reconfere toda linha `PENDING` a cada 5
-segundos como rede de segurança, pro caso da aplicação ter caído antes do disparo assíncrono
-rodar). Cada id é publicado no exchange `camunda.events` usando a chave do processo como routing
-key, e só é marcado como `SENT` depois que o RabbitMQ **confirma** a publicação.
+assíncrona, passando exatamente as duas linhas que acabou de escrever (as entidades de verdade,
+sem query — só o que essa transação produziu). Uma varredura agendada, separada, reconfere toda
+linha que ainda sobrar em `outbox_message` a cada 5 segundos como rede de segurança, pro caso da
+aplicação ter caído antes do disparo assíncrono rodar. Cada mensagem é publicada no exchange
+`camunda.events` usando a chave do processo como routing key, e sua linha só é **apagada** depois
+que o RabbitMQ **confirma** a publicação — não existe flag de status, estar na tabela já significa
+pendente.
 
 **6. O `CamundaEventsRabbitConsumer` consome as duas mensagens.** Para cada uma ele calcula a chave de
 idempotência `(transactionId, processInstanceId)`, checa `processed_transaction`, e — como nenhum
@@ -431,18 +435,22 @@ container servlet real, job executor real) contra um **RabbitMQ real**, iniciado
 Ele inicia o `cadastroClienteProcess` com um CEP real, deixa a API real do ViaCEP responder, e
 verifica contra o sistema vivo — a instância filha criada pela `CallActivity`, os dois registros em
 `processed_transaction`, o outbox esvaziando — e por fim reenvia uma mensagem manualmente pra
-provar que uma reentrega é ignorada. Cada fase loga um checkpoint `===`, então rodar esse teste
-narra a cadeia inteira, em ordem, no console:
+provar que uma reentrega é ignorada. Como uma linha confirmada é apagada (não só marcada) de
+`outbox_message`, o teste não consegue reler a mensagem já enviada de volta da tabela depois; ele
+liga uma fila extra, só de teste, no mesmo exchange antes de iniciar o processo, unicamente pra
+capturar uma cópia crua de tudo que é publicado, e pega dali a mensagem que precisa. Cada fase loga
+um checkpoint `===`, então rodar esse teste narra a cadeia inteira, em ordem, no console:
 
 ```
+=== 0) abrindo uma fila auxiliar ligada no mesmo exchange ("#"), so pra capturar uma copia crua de cada mensagem publicada - nao depende da linha do outbox sobreviver ao envio, ja que ela e apagada assim que o RabbitMQ confirma ===
 === 1) iniciando cadastroClienteProcess (nome, cpf, cep) ===
 processInstanceId (pai) = 2e149a08-8788-11f1-a4b7-f27759d3d018
 === 2) esperando o job assincrono da CallActivity + o ViaCEP real completarem e o processo chegar em 'Avaliar Cadastro' ===
 processInstanceId (filho, consultaCepProcess) = 2e253be4-8788-11f1-a4b7-f27759d3d018
 === 3) esperando outbox -> RabbitMQ (publisher-confirm) -> consumer confirmarem AS DUAS processInstanceId (mesma transacao, dois processos) ===
 confirmado: processed_transaction tem registro para o pai E para o filho
-confirmado: nenhuma linha PENDING sobrou no outbox (tudo foi confirmado pelo broker)
-=== 4) reenviando manualmente a MESMA mensagem do filho para provar a idempotencia ===
+confirmado: outbox esvaziou (tudo foi confirmado pelo broker e apagado)
+=== 4) pegando a copia crua da mensagem do filho na fila auxiliar e reenviando manualmente para provar a idempotencia ===
 Mensagem (transacao=..., processInstance=...) ja processada, ignorando reentrega
 confirmado: a reentrega foi ignorada, processed_transaction nao cresceu (continua em 3 registro(s))
 === fim: outbox -> RabbitMQ -> consumer -> idempotencia validados de ponta a ponta ===
@@ -509,31 +517,35 @@ sugerir mais do que de fato entrega.
   assume um único escritor:
   - O caminho de baixa latência (`OutboxRelay.triggerAsync(List<OutboxMessage>)`) publica **só as
     entidades que a própria transação recém-commitada produziu** — recebe os objetos exatos da
-    `TransactionSynchronization` em memória que os escreveu, sem nenhum `SELECT` (marcar `SENT`
-    depois é um `UPDATE ... WHERE id = ?` direto, não um ler-e-gravar). Suba duas instâncias e
+    `TransactionSynchronization` em memória que os escreveu, sem nenhum `SELECT` (apagar a linha
+    depois é um `DELETE ... WHERE id = ?` direto, não um ler-e-apagar). Suba duas instâncias e
     nenhuma mexe numa linha que a outra escreveu por esse caminho — sem corrida entre instâncias
     no caso comum (broker saudável, nada caiu).
   - `OutboxRelay.relayPendingMessages()`, a varredura agendada, ainda precisa consultar de forma
-    ampla (`findByStatusOrderById(PENDING)`, sem filtro de origem) — é o único jeito de uma
-    instância sobrevivente resgatar uma linha que outra instância, ao cair no meio do caminho,
-    nunca chegou a publicar. Suba duas instâncias e a varredura das duas pode pegar a mesma linha
-    órfã ao mesmo tempo — não incorreto de ponta a ponta (o consumidor é idempotente), mas
-    desperdiçado, e é uma corrida real que o `synchronized` só fecha **dentro de uma mesma JVM**,
-    não entre instâncias.
+    ampla (`findAllByOrderById()`, sem filtro de origem, sem status pra filtrar porque não existe
+    mais um) — é o único jeito de uma instância sobrevivente resgatar uma linha que outra
+    instância, ao cair no meio do caminho, nunca chegou a publicar. Suba duas instâncias e a
+    varredura das duas pode pegar a mesma linha órfã ao mesmo tempo — não incorreto de ponta a
+    ponta (o consumidor é idempotente), mas desperdiçado, e é uma corrida real que o
+    `synchronized` só fecha **dentro de uma mesma JVM**, não entre instâncias.
   - Essa mesma query da varredura não tem `LIMIT`/paginação — cada ciclo carrega *todas* as linhas
-    pendentes pra memória. Tranquilo no volume da demo; um backlog real (ex.: depois de uma queda
-    do broker) precisa de lotes.
+    que sobrarem pra memória. Tranquilo no volume da demo; um backlog real (ex.: depois de uma
+    queda do broker) precisa de lotes.
   - Levar a varredura a um escalonamento horizontal multi-instância de verdade exige captura em
     nível de linha (ex.: `SELECT ... FOR UPDATE SKIP LOCKED`) no lugar do método `synchronized`
-    atual, mais uma query limitada e indexada.
-- **Sem migração de schema, sem ajuste de índice.** `spring.jpa.hibernate.ddl-auto=update` contra
-  H2 em memória é conveniente pra uma demo que reseta a cada execução; um deploy real precisa de
-  Flyway/Liquibase e um índice explícito em `outbox_message.status` (a query de hoje degradaria
-  conforme a tabela cresce, já que nada arquiva as linhas `SENT`).
-- **Sem política de retenção/arquivamento.** Tanto `outbox_message` quanto `processed_transaction`
-  crescem pra sempre — nada remove linhas `SENT` antigas ou registros de idempotência antigos. A
-  busca de idempotência em si continua rápida (é um hit na chave primária), mas crescimento
-  ilimitado de armazenamento é uma preocupação real de produção que não é endereçada aqui.
+    atual, mais uma query limitada.
+- **Sem migração de schema.** `spring.jpa.hibernate.ddl-auto=update` contra H2 em memória é
+  conveniente pra uma demo que reseta a cada execução; um deploy real precisa de Flyway/Liquibase.
+  (`outbox_message` não precisa de um índice extra pra query da varredura — ela só ordena pela
+  chave primária, já indexada por definição — porque não existe coluna de status pra filtrar: uma
+  linha confirmada é apagada, não marcada, então toda linha que sobra já é, implicitamente,
+  pendente.)
+- **Sem política de retenção/arquivamento pro `processed_transaction`.** `outbox_message` já se
+  autolimpa agora — uma linha só existe enquanto pendente, e é apagada no instante em que é
+  confirmada — mas a tabela de idempotência do consumidor não tem essa limpeza: todo par
+  `(transactionId, processInstanceId)` que ela já viu fica lá pra sempre. A busca em si continua
+  rápida (é um hit na chave primária), mas crescimento ilimitado de armazenamento é uma
+  preocupação real de produção que não é endereçada aqui.
 - **A autenticação do Cockpit/Tasklist ainda não está configurada** — `camunda.bpm.admin-user`
   está ausente do `application.properties`, então as webapps são implantadas mas não existe um
   usuário para fazer login. A API REST e a management UI do RabbitMQ estão totalmente utilizáveis

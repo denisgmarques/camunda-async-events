@@ -16,17 +16,18 @@ import java.util.List;
  * <ul>
  *   <li>{@link #triggerAsync(List)} — disparo de baixa latência logo após o commit, publica
  *   <b>as entidades que a própria transação acabou de gravar</b> (recebidas em memória, sem
- *   SELECT nenhum) em vez de consultar o banco por tudo que está PENDING. Isso é o que garante
- *   que uma JVM nunca mexe em linhas escritas por outra transação/instância no caminho comum
- *   (broker saudável): cada instância só publica o que ela mesma produziu, ninguém disputa a
- *   mesma linha, e nem precisa reler o que acabou de escrever.</li>
- *   <li>{@link #relayPendingMessages()} — rede de segurança agendada, varre TODAS as linhas
- *   PENDING (de qualquer origem). Precisa ser ampla assim de propósito: é o único jeito de uma
- *   instância sobrevivente resgatar uma linha que outra JVM escreveu e não chegou a publicar
- *   antes de cair (crash entre o insert e o disparo assíncrono, ou o broker fora do ar por
- *   tempo suficiente). Restringir esse caminho também por origem devolveria a garantia de
- *   "sem corrida", mas quebraria a recuperação — a linha órfã nunca mais seria reenviada por
- *   ninguém.</li>
+ *   SELECT nenhum) em vez de consultar o banco por tudo que ainda está pendente. Isso é o que
+ *   garante que uma JVM nunca mexe em linhas escritas por outra transação/instância no caminho
+ *   comum (broker saudável): cada instância só publica o que ela mesma produziu, ninguém disputa
+ *   a mesma linha, e nem precisa reler o que acabou de escrever.</li>
+ *   <li>{@link #relayPendingMessages()} — rede de segurança agendada, varre TODAS as linhas que
+ *   ainda existem na tabela (de qualquer origem — não há mais coluna de status: a linha some
+ *   assim que é confirmada, então "existir" já é o único estado pendente). Precisa ser ampla
+ *   assim de propósito: é o único jeito de uma instância sobrevivente resgatar uma linha que
+ *   outra JVM escreveu e não chegou a publicar antes de cair (crash entre o insert e o disparo
+ *   assíncrono, ou o broker fora do ar por tempo suficiente). Restringir esse caminho também
+ *   por origem devolveria a garantia de "sem corrida", mas quebraria a recuperação — a linha
+ *   órfã nunca mais seria reenviada por ninguém.</li>
  * </ul>
  */
 @Component
@@ -39,7 +40,7 @@ public class OutboxRelay {
 
 	@Scheduled(fixedDelayString = "${camunda.events.rabbitmq.relay-interval-ms:5000}")
 	public synchronized void relayPendingMessages() {
-		List<OutboxMessage> pending = repository.findByStatusOrderById(OutboxStatus.PENDING);
+		List<OutboxMessage> pending = repository.findAllByOrderById();
 		if (pending.isEmpty()) {
 			return;
 		}

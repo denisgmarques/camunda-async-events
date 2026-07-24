@@ -64,8 +64,9 @@ into Camunda's own transaction lifecycle:
   neither is — there is no window where the process moved on but nobody was told, or vice versa.
 - Only **after** the transaction has actually committed does anything attempt to talk to
   RabbitMQ. A background relay (with an low-latency "kick" right after commit, plus a periodic
-  safety-net sweep) publishes pending rows and only marks them `SENT` once RabbitMQ has
-  **confirmed** receipt.
+  safety-net sweep) publishes pending rows and only **deletes** each one once RabbitMQ has
+  **confirmed** receipt — there's no "sent" status to track: a row's mere presence in the table
+  means it's still pending.
 - On the receiving end, RabbitMQ is configured with a real retry-with-backoff-then-DLQ topology
   (5 attempts, 10 seconds apart, no plugins required), and the consumer is **idempotent**: every
   message carries the id of the transaction (and process instance) that produced it, and the
@@ -80,8 +81,9 @@ mocked in a unit test:
 
 - ✅ The event and the process state change really do land in the same DB transaction (verified by
   making the outbox write fail and confirming the process transaction rolls back with it).
-- ✅ A message published to RabbitMQ is only marked `SENT` after a **publisher confirm** — if the
-  broker never confirms, the row stays `PENDING` and is retried by the relay.
+- ✅ A message published to RabbitMQ is only deleted from the outbox after a **publisher
+  confirm** — if the broker never confirms, the row stays right where it is and is retried by
+  the relay.
 - ✅ A genuine duplicate delivery (same transaction id, same process instance id) is silently and
   correctly ignored by the consumer.
 - ✅ A **CallActivity** sub-process can share one database transaction with its parent process —
@@ -248,11 +250,12 @@ process engine itself is using, via `beforeCommit`. If the insert failed, the pr
 change would roll back with it.
 
 **5. `afterCompletion` fires once `T2` has committed** and asynchronously kicks `OutboxRelay` with
-the exact two row ids just written — no query, just what this transaction produced (a scheduled
-sweep separately re-checks every `PENDING` row every 5 seconds as a safety net, in case the app
-crashed before the async kick ran). Each id gets published to the `camunda.events` exchange with
-the process definition key as routing key, and only flips to `SENT` after RabbitMQ **confirms**
-the publish.
+the exact two rows just written (the actual entities, no query — just what this transaction
+produced). A scheduled sweep separately re-checks every row still sitting in `outbox_message`
+every 5 seconds as a safety net, in case the app crashed before the async kick ran. Each message
+gets published to the `camunda.events` exchange with the process definition key as routing key,
+and its row is only **deleted** after RabbitMQ **confirms** the publish — there's no status flag,
+being in the table at all means still pending.
 
 **6. `CamundaEventsRabbitConsumer` consumes both messages.** For each one it computes the idempotency key
 `(transactionId, processInstanceId)`, checks `processed_transaction`, and — since neither pair has
@@ -419,19 +422,23 @@ just have Docker available.
 
 It starts `cadastroClienteProcess` with a real ZIP code, lets the real ViaCEP API answer, and
 asserts against the live system — the child process instance created by the `CallActivity`, both
-`processed_transaction` rows, the outbox draining to empty — then republishes one message by hand
-to prove a redelivery is ignored. Each phase logs a `===` checkpoint, so running it narrates the
-whole chain, in order, on the console:
+`processed_transaction` rows, the outbox draining to empty — then manually republishes one message
+to prove a redelivery is ignored. Since a confirmed row is deleted (not just flagged) from
+`outbox_message`, the test can't read the sent message back from the table afterward; it binds an
+extra, test-only queue to the same exchange before starting the process, purely to capture a raw
+copy of everything published, and pulls the message it needs from there. Each phase logs a `===`
+checkpoint, so running it narrates the whole chain, in order, on the console:
 
 ```
+=== 0) abrindo uma fila auxiliar ligada no mesmo exchange ("#"), so pra capturar uma copia crua de cada mensagem publicada - nao depende da linha do outbox sobreviver ao envio, ja que ela e apagada assim que o RabbitMQ confirma ===
 === 1) iniciando cadastroClienteProcess (nome, cpf, cep) ===
 processInstanceId (pai) = 2e149a08-8788-11f1-a4b7-f27759d3d018
 === 2) esperando o job assincrono da CallActivity + o ViaCEP real completarem e o processo chegar em 'Avaliar Cadastro' ===
 processInstanceId (filho, consultaCepProcess) = 2e253be4-8788-11f1-a4b7-f27759d3d018
 === 3) esperando outbox -> RabbitMQ (publisher-confirm) -> consumer confirmarem AS DUAS processInstanceId (mesma transacao, dois processos) ===
 confirmado: processed_transaction tem registro para o pai E para o filho
-confirmado: nenhuma linha PENDING sobrou no outbox (tudo foi confirmado pelo broker)
-=== 4) reenviando manualmente a MESMA mensagem do filho para provar a idempotencia ===
+confirmado: outbox esvaziou (tudo foi confirmado pelo broker e apagado)
+=== 4) pegando a copia crua da mensagem do filho na fila auxiliar e reenviando manualmente para provar a idempotencia ===
 Mensagem (transacao=..., processInstance=...) ja processada, ignorando reentrega
 confirmado: a reentrega foi ignorada, processed_transaction nao cresceu (continua em 3 registro(s))
 === fim: outbox -> RabbitMQ -> consumer -> idempotencia validados de ponta a ponta ===
@@ -497,29 +504,32 @@ more than it does.
   a single writer:
   - The low-latency path (`OutboxRelay.triggerAsync(List<OutboxMessage>)`) publishes **only the
     entities the transaction that just committed produced** — it's handed the exact objects from
-    the in-memory `TransactionSynchronization` that wrote them, with no `SELECT` at all (marking
-    `SENT` afterward is a targeted `UPDATE ... WHERE id = ?`, not a read-then-write). Run two
+    the in-memory `TransactionSynchronization` that wrote them, with no `SELECT` at all (deleting
+    the row afterward is a targeted `DELETE ... WHERE id = ?`, not a read-then-delete). Run two
     instances and neither touches a row the other one wrote on this path — no cross-instance race
     on the common case (broker healthy, nothing crashed).
   - `OutboxRelay.relayPendingMessages()`, the scheduled sweep, still has to query broadly
-    (`findByStatusOrderById(PENDING)`, no origin filter) — that's the only way a surviving
-    instance can rescue a row an instance that crashed mid-flight never got to publish. Run two
-    instances and the sweep in both can pick up the same orphaned row at the same time — not
-    incorrect end-to-end (the consumer is idempotent) but wasteful, and it's a real race the
-    `synchronized` keyword only closes **within one JVM**, not across instances.
-  - That same sweep query has no `LIMIT`/pagination — every cycle loads *all* pending rows into
+    (`findAllByOrderById()`, no origin filter, no status to filter by since there isn't one) —
+    that's the only way a surviving instance can rescue a row an instance that crashed mid-flight
+    never got to publish. Run two instances and the sweep in both can pick up the same orphaned
+    row at the same time — not incorrect end-to-end (the consumer is idempotent) but wasteful,
+    and it's a real race the `synchronized` keyword only closes **within one JVM**, not across
+    instances.
+  - That same sweep query has no `LIMIT`/pagination — every cycle loads *all* remaining rows into
     memory. Fine at demo volume; a real backlog (e.g. after a broker outage) needs batching.
   - Getting the sweep to real multi-instance horizontal scaling means row-level claiming (e.g.
     `SELECT ... FOR UPDATE SKIP LOCKED`) instead of the current `synchronized` method, plus a
-    bounded, indexed query.
-- **No schema migrations, no index tuning.** `spring.jpa.hibernate.ddl-auto=update` against H2
-  in-memory is convenient for a demo that resets on every run; a real deployment needs
-  Flyway/Liquibase and an explicit index on `outbox_message.status` (today's query would degrade
-  as the table grows, since nothing archives `SENT` rows).
-- **No retention/archiving policy.** Both `outbox_message` and `processed_transaction` grow
-  forever — nothing prunes old `SENT` rows or old idempotency records. The idempotency lookup
-  itself stays fast (it's a primary-key hit), but unbounded storage growth is a real production
-  concern that isn't addressed here.
+    bounded query.
+- **No schema migrations.** `spring.jpa.hibernate.ddl-auto=update` against H2 in-memory is
+  convenient for a demo that resets on every run; a real deployment needs Flyway/Liquibase.
+  (`outbox_message` doesn't need an extra index for the sweep's query — it just orders by the
+  primary key, already indexed by definition — since there's no status column to filter by:
+  a confirmed row is deleted, not flagged, so every remaining row is implicitly pending.)
+- **No retention/archiving policy for `processed_transaction`.** `outbox_message` is self-pruning
+  now — a row only exists while pending, and is deleted the moment it's confirmed sent — but the
+  consumer's idempotency table has no such cleanup: every `(transactionId, processInstanceId)`
+  pair it has ever seen stays there forever. The lookup itself stays fast (it's a primary-key
+  hit), but unbounded storage growth is a real production concern that isn't addressed here.
 - **Cockpit/Tasklist authentication isn't configured yet** — `camunda.bpm.admin-user` is absent
   from `application.properties`, so the webapps are deployed but there's no user to log in with.
   The REST API and RabbitMQ management UI are fully usable in the meantime.

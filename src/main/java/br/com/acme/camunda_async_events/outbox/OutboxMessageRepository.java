@@ -9,15 +9,17 @@ import java.util.List;
 
 public interface OutboxMessageRepository extends JpaRepository<OutboxMessage, Long> {
 
-	List<OutboxMessage> findByStatusOrderById(OutboxStatus status);
+	/** Não existe mais filtro por status: toda linha que existe aqui está, por definição, pendente. */
+	List<OutboxMessage> findAllByOrderById();
 
 	/**
-	 * UPDATE direto por id, sem SELECT antes: quem chama aqui já tem a entidade (possivelmente
-	 * detached, vinda de fora desta transação) e só quer gravar o novo status, sem pagar o
-	 * custo de um {@code merge()} (que faria um SELECT escondido pra carregar o estado atual
-	 * antes de decidir o UPDATE).
+	 * Sobrescreve {@link JpaRepository#deleteById(Object)} para ser um DELETE puro, sem SELECT
+	 * antes: a implementação padrão do Spring Data faz um {@code findById()} e só então apaga a
+	 * entidade carregada, o que reintroduziria a leitura que o caminho de baixa latência do
+	 * {@link OutboxPublisher} foi feito pra evitar.
 	 */
+	@Override
 	@Modifying
-	@Query("UPDATE OutboxMessage o SET o.status = :status WHERE o.id = :id")
-	void updateStatus(@Param("id") Long id, @Param("status") OutboxStatus status);
+	@Query("DELETE FROM OutboxMessage o WHERE o.id = :id")
+	void deleteById(@Param("id") Long id);
 }
