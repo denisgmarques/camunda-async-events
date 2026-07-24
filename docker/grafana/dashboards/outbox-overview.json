@@ -62,12 +62,12 @@
     },
     {
       "id": 6,
-      "title": "HTTP - taxa de requisicoes por endpoint",
+      "title": "HTTP - taxa de requisicoes por status (API REST do Camunda e via Jersey, nao Spring MVC - nao tem tag de URI, so agrega por status)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
       "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
       "targets": [
-        { "expr": "sum(rate(http_server_requests_seconds_count[1m])) by (uri, status)", "legendFormat": "{{uri}} [{{status}}]" }
+        { "expr": "sum(rate(http_server_requests_seconds_count[1m])) by (status)", "legendFormat": "status {{status}}" }
       ]
     },
     {

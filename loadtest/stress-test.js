@@ -48,6 +48,7 @@ export default function () {
 	);
 
 	check(res, {
-		'processo iniciado (201)': (r) => r.status === 201,
+		// A API REST do Camunda responde 200 (nao 201) mesmo criando o recurso.
+		'processo iniciado (200)': (r) => r.status === 200,
 	});
 }
