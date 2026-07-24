@@ -75,6 +75,33 @@ consumer (Spring AMQP's default when `@RabbitListener` doesn't set `concurrency`
 which is a deliberate architecture change, not a tuning knob, and out of scope for this demo (see
 the main [README](../README.md#known-limitations--trade-offs)).
 
+## Screenshots from a live run
+
+Captured with `./loadtest/run.sh` against the tuned config (Hikari pool 50, consumer concurrency
+5-10) — the same conditions as round 3, confirmed visually instead of just in exported numbers.
+
+![Grafana dashboard during the run](images/load-tests/grafana-dashboard.png)
+
+Backlog climbs and holds around 40–60 rather than draining to zero (top panel); publish-confirm
+p95/p99 trend upward through the run instead of settling (middle-left); HikariCP `active` sits
+pinned near its ceiling with `pending` right behind it (middle-right) — all three panels telling
+the same story the exported metrics did, live.
+
+![RabbitMQ management overview during the run](images/load-tests/rabbitmq-overview.png)
+
+The imbalance in one screenshot: **Publish 569/s** vs. **Deliver 248/s** — production outrunning
+consumption by more than 2x even with 10 consumer threads running, which is exactly why "Ready"
+messages climb continuously (69,961 and rising) instead of holding steady.
+
+![htop showing all 20 cores under load](images/load-tests/htop-cpu.png)
+
+The clearest evidence in the whole report. This is `htop` in thread view: nearly every row here is
+a **thread of the same JVM process** (`Tasks: 226, 2308 thr` — 2,308 threads in that one process),
+each independently burning 15–35% of a core, spread across all 20 of them (80–97% each). One lone
+Erlang scheduler thread (RabbitMQ, 18.3%) barely registers next to it. This is what "H2 runs
+in-process" looks like at the OS level: not a separate service under load, but hundreds of the
+app's own threads all doing MVCC/locking work inside the same JVM at once.
+
 ## Charts
 
 Peak throughput barely changed round to round — the system kept accepting ~630–720 req/s

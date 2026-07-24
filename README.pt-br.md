@@ -582,7 +582,7 @@ referência de arquitetura, não uma configuração de produção.
 ### Um exemplo real: três rodadas, três gargalos diferentes
 
 Rodei o cenário acima três vezes, mudando uma coisa entre cada rodada, pra ver o gargalo se mover
-de verdade em vez de só afirmar que ele existiria (relato completo, com gráficos, em
+de verdade em vez de só afirmar que ele existiria (relato completo, com gráficos e capturas de tela, em
 [`docs/load-test-report.md`](docs/load-test-report.md), em inglês):
 
 | | Rodada 1 (padrão) | Rodada 2 (pool Hikari 10→50) | Rodada 3 (+ concorrência do consumidor 1→5-10) |

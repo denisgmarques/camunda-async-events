@@ -567,7 +567,7 @@ reference architecture, not a production configuration.
 ### A worked example: three rounds, three different bottlenecks
 
 Ran the scenario above three times, changing one thing between each run, to see the bottleneck
-actually move instead of just asserting it would (full write-up, with charts, in
+actually move instead of just asserting it would (full write-up, with charts and screenshots, in
 [`docs/load-test-report.md`](docs/load-test-report.md)):
 
 | | Round 1 (defaults) | Round 2 (Hikari pool 10→50) | Round 3 (+ consumer concurrency 1→5-10) |
