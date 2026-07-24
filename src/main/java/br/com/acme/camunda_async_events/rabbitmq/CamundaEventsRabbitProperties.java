@@ -38,4 +38,15 @@ public class CamundaEventsRabbitProperties {
 	 * a varredura existe pra cobrir: recuperar uma linha órfã depois de um crash.
 	 */
 	private Duration relayMinAge = Duration.ofSeconds(15);
+
+	/**
+	 * Concorrência do {@code @RabbitListener} do consumidor, no formato aceito pelo Spring AMQP
+	 * ({@code "min-max"} ou um número fixo). O padrão do Spring AMQP sem essa configuração é
+	 * <b>uma única thread consumidora</b> — descoberto sob carga real (ver
+	 * {@code loadtest/stress-test.js}): produção sustentando ~700 msg/s contra 1 consumidor
+	 * fazendo 2 idas ao banco por mensagem (checagem de idempotência + insert) empacou a fila
+	 * principal em centenas de milhares de mensagens, com o RabbitMQ gastando CPU alto só
+	 * gerenciando o acúmulo.
+	 */
+	private String consumerConcurrency = "5-10";
 }

@@ -33,6 +33,10 @@ import java.util.Map;
  * retry). O número de vezes que a mensagem já passou pela fila principal é lido do
  * cabeçalho {@code x-death}; ao atingir {@code maxRetries} ela é publicada manualmente na
  * DLQ em vez de ser rejeitada de novo.
+ *
+ * <p>Concorrência: ver {@link CamundaEventsRabbitProperties#getConsumerConcurrency()} — sem
+ * configurar isso explicitamente, o Spring AMQP usa uma única thread consumidora, que sob
+ * carga real fica muito atrás da produção (ver {@code loadtest/stress-test.js}).
  */
 @Component
 @Slf4j
@@ -44,7 +48,8 @@ public class CamundaEventsRabbitConsumer {
 	private final RabbitTemplate rabbitTemplate;
 	private final CamundaEventsRabbitProperties properties;
 
-	@RabbitListener(queues = "${camunda.events.rabbitmq.queue}")
+	@RabbitListener(queues = "${camunda.events.rabbitmq.queue}",
+			concurrency = "${camunda.events.rabbitmq.consumer-concurrency}")
 	public void onMessage(Message message) {
 		ProcessInstanceEventMessage event;
 		try {

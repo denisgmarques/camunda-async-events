@@ -559,6 +559,46 @@ Exposing `/actuator/*` without authentication is fine for this — local monitor
 test — and is one more instance of the same thing the rest of this README keeps saying:
 reference architecture, not a production configuration.
 
+### A worked example: three rounds, three different bottlenecks
+
+Ran the scenario above three times, changing one thing between each run, to see the bottleneck
+actually move instead of just asserting it would:
+
+| | Round 1 (defaults) | Round 2 (Hikari pool 10→50) | Round 3 (+ consumer concurrency 1→5-10) |
+|---|---|---|---|
+| k6 throughput | 701 req/s | 716 req/s | 630 req/s |
+| HTTP p95 | 108ms | 120ms | 134ms |
+| `outbox_publish_confirm_seconds` p95/p99 | 5ms / 8ms | 15ms / 30ms | 37.5ms / 83.5ms |
+| `camunda.events.queue` depth after the run | 431,991 | 261,032 | 67,536 |
+
+Round 1: `hikaricp_connections_pending` peaked at 84 against a pool of 10 — an obvious, textbook
+signal. Bumping the pool to 50 (round 2) barely moved HTTP latency and made the *outbox*
+publish-confirm latency 3x worse, which was the first surprise: relieving one constraint let more
+work through concurrently, which pushed harder on whatever came next.
+
+What actually explained round 2 wasn't a metric on the dashboard — `docker stats` showed the
+RabbitMQ container pegged at 444% CPU, and `rabbitmqctl list_queues` showed why:
+`camunda.events.queue` had 431,991 messages sitting there with **zero consumers processing it**.
+`CamundaEventsRabbitConsumer`'s `@RabbitListener` never set `concurrency`, and Spring AMQP's
+default for that is a single consumer thread doing two DB round-trips per message (idempotency
+check + insert) — nowhere near enough against ~700 msg/s of production. This is exactly why
+[queue depth in the RabbitMQ management UI](#monitoring-and-load-testing) is worth watching
+alongside the Grafana dashboard: it's not one of the custom metrics here, and it's where this
+particular bottleneck was actually visible.
+
+Round 3 set `camunda.events.rabbitmq.consumer-concurrency=5-10` (now configurable — see
+`CamundaEventsRabbitProperties`) and re-ran. Queue depth dropped by 74% (67,536 vs 431,991) — the
+concurrency fix genuinely helped drain the backlog. But HTTP latency, publish-confirm latency,
+*and* throughput all got worse again, all at once. That pattern — every metric degrading together
+rather than one clear one climbing — is itself informative: it stops pointing at any single
+component and starts pointing at a shared resource all of them contend for. Here that's the
+obvious one this project already names as a demo-scope trade-off: **a single H2 in-memory
+database**, now serving Tomcat's request threads, the outbox relay, *and* up to 10 consumer
+threads at once, all funneling into one engine with no horizontal write capacity to add. Backed
+by evidence now, not just asserted: this is where tuning connection pools and thread counts stops
+helping, and the next real step would be swapping H2 for a real database — a bigger, deliberate
+change, not a config tweak, and out of scope for what this demo is trying to show.
+
 ## Known limitations / trade-offs
 
 This is a reference for the **pattern**, not a checklist-complete production deployment. The

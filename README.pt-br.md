@@ -575,6 +575,48 @@ Expor `/actuator/*` sem autenticação é aceitável aqui — monitoramento loca
 carga — e é mais uma instância da mesma coisa que o resto deste README já vem dizendo: modelo de
 referência de arquitetura, não uma configuração de produção.
 
+### Um exemplo real: três rodadas, três gargalos diferentes
+
+Rodei o cenário acima três vezes, mudando uma coisa entre cada rodada, pra ver o gargalo se mover
+de verdade em vez de só afirmar que ele existiria:
+
+| | Rodada 1 (padrão) | Rodada 2 (pool Hikari 10→50) | Rodada 3 (+ concorrência do consumidor 1→5-10) |
+|---|---|---|---|
+| Throughput do k6 | 701 req/s | 716 req/s | 630 req/s |
+| HTTP p95 | 108ms | 120ms | 134ms |
+| `outbox_publish_confirm_seconds` p95/p99 | 5ms / 8ms | 15ms / 30ms | 37,5ms / 83,5ms |
+| Profundidade de `camunda.events.queue` no final | 431.991 | 261.032 | 67.536 |
+
+Rodada 1: `hikaricp_connections_pending` chegou a 84 contra um pool de 10 — um sinal clássico,
+óbvio. Subir o pool pra 50 (rodada 2) quase não mexeu na latência HTTP e deixou a latência do
+publisher-confirm do **outbox** 3x pior, que foi a primeira surpresa: aliviar uma restrição deixou
+mais trabalho passar ao mesmo tempo, o que empurrou mais forte no que vinha depois.
+
+O que explicava a rodada 2 de verdade não estava em nenhuma métrica do dashboard — o `docker
+stats` mostrou o container do RabbitMQ grudado em 444% de CPU, e o `rabbitmqctl list_queues`
+mostrou o motivo: `camunda.events.queue` tinha 431.991 mensagens paradas lá, **com zero
+consumidores processando**. O `@RabbitListener` do `CamundaEventsRabbitConsumer` nunca definia
+`concurrency`, e o padrão do Spring AMQP pra isso é uma única thread consumidora fazendo duas idas
+ao banco por mensagem (checagem de idempotência + insert) — longe do suficiente contra ~700 msg/s
+de produção. É exatamente por isso que vale acompanhar a
+[profundidade da fila na management UI do RabbitMQ](#monitoramento-e-teste-de-carga) junto com o
+dashboard do Grafana: não é uma das métricas customizadas daqui, e foi onde esse gargalo
+específico ficou visível de verdade.
+
+A rodada 3 configurou `camunda.events.rabbitmq.consumer-concurrency=5-10` (agora configurável —
+ver `CamundaEventsRabbitProperties`) e rodou de novo. A profundidade da fila caiu 74% (67.536 vs
+431.991) — o ajuste de concorrência ajudou de verdade a esvaziar o acúmulo. Mas latência HTTP,
+latência do publisher-confirm *e* throughput pioraram todos juntos de novo. Esse padrão — toda
+métrica degradando junto, em vez de uma clara subindo sozinha — já é informativo por si só: para
+de apontar pra um componente único e passa a apontar pra um recurso compartilhado que todos eles
+disputam. Aqui é o óbvio que este projeto já nomeia como trade-off de escopo de demo: **um único
+banco H2 em memória**, agora atendendo as threads de requisição do Tomcat, o relay do outbox *e*
+até 10 threads consumidoras ao mesmo tempo, tudo afunilando pra um engine só, sem capacidade de
+escrita horizontal pra adicionar. Com evidência agora, não só afirmado: é aqui que ajustar pool de
+conexão e quantidade de threads para de ajudar, e o próximo passo real seria trocar o H2 por um
+banco de verdade — uma mudança maior e deliberada, não um ajuste de configuração, e fora do
+escopo do que esta demo se propõe a mostrar.
+
 ## Limitações conhecidas / trade-offs
 
 Isso é uma referência do **padrão**, não uma implantação de produção com checklist completo. Os
