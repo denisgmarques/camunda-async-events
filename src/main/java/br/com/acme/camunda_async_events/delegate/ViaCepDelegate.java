@@ -3,10 +3,16 @@ package br.com.acme.camunda_async_events.delegate;
 import org.camunda.bpm.engine.delegate.BpmnError;
 import org.camunda.bpm.engine.delegate.DelegateExecution;
 import org.camunda.bpm.engine.delegate.JavaDelegate;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
+/**
+ * Ativo em todo profile, exceto {@code loadtest} (ver {@link LoadTestViaCepDelegate}) — um teste
+ * de carga martelando a API real do ViaCEP se auto-sabota em rate limit em segundos.
+ */
+@Profile("!loadtest")
 @Component("viaCepDelegate")
 public class ViaCepDelegate implements JavaDelegate {
 

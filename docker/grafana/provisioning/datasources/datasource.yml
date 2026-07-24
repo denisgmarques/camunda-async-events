@@ -1,0 +1,11 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # network_mode: host (ver docker-compose.yml) - "localhost" aqui e o host de verdade, onde
+    # o Prometheus (tambem em host mode) esta escutando na porta 9090.
+    url: http://localhost:9090
+    isDefault: true
+    editable: false

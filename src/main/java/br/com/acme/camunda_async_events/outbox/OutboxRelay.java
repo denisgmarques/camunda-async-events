@@ -1,6 +1,9 @@
 package br.com.acme.camunda_async_events.outbox;
 
 import br.com.acme.camunda_async_events.rabbitmq.CamundaEventsRabbitProperties;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
@@ -57,18 +60,37 @@ public class OutboxRelay {
 	private final OutboxMessageRepository repository;
 	private final OutboxPublisher publisher;
 	private final CamundaEventsRabbitProperties properties;
+	private final MeterRegistry meterRegistry;
+
+	/**
+	 * {@code outbox_backlog_size}: quantas linhas existem em {@code outbox_message} agora. É a
+	 * métrica mais direta de "o relay está acompanhando o ritmo?" — se ela cresce continuamente
+	 * durante um teste de carga, o gargalo está aqui (produção de eventos mais rápida que a
+	 * publicação), não no HTTP nem no Camunda. {@code gauge()} não faz nenhuma query própria; só
+	 * registra a função {@code count()} pra ser chamada quando o Prometheus raspar o endpoint.
+	 */
+	@PostConstruct
+	void registerBacklogGauge() {
+		meterRegistry.gauge("outbox.backlog.size", repository, OutboxMessageRepository::count);
+	}
 
 	@Scheduled(fixedDelayString = "${camunda.events.rabbitmq.relay-interval-ms:5000}")
 	public void relayPendingMessages() {
-		Instant threshold = Instant.now().minus(properties.getRelayMinAge());
-		List<OutboxMessage> pending = repository.findByCreatedAtBeforeOrderById(threshold);
-		if (pending.isEmpty()) {
-			return;
-		}
+		Timer.Sample sample = Timer.start(meterRegistry);
+		try {
+			Instant threshold = Instant.now().minus(properties.getRelayMinAge());
+			List<OutboxMessage> pending = repository.findByCreatedAtBeforeOrderById(threshold);
+			if (pending.isEmpty()) {
+				return;
+			}
 
-		log.debug("Relay encontrou {} mensagem(ns) outbox pendente(s) com mais de {}", pending.size(),
-				properties.getRelayMinAge());
-		pending.forEach(message -> publisher.publish(message.getId()));
+			log.debug("Relay encontrou {} mensagem(ns) outbox pendente(s) com mais de {}", pending.size(),
+					properties.getRelayMinAge());
+			pending.forEach(message -> publisher.publish(message.getId()));
+		}
+		finally {
+			sample.stop(meterRegistry.timer("outbox.relay.sweep"));
+		}
 	}
 
 	/**

@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: camunda-async-events
+    metrics_path: /actuator/prometheus
+    static_configs:
+      # Container roda em network_mode: host (ver docker-compose.yml) - "localhost" aqui e o
+      # host de verdade, onde a aplicacao Spring Boot esta escutando (./mvnw spring-boot:run).
+      - targets: ["localhost:8080"]

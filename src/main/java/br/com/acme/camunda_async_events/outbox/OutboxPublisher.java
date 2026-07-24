@@ -1,6 +1,8 @@
 package br.com.acme.camunda_async_events.outbox;
 
 import br.com.acme.camunda_async_events.rabbitmq.CamundaEventsRabbitProperties;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.MessagePostProcessor;
@@ -24,6 +26,7 @@ class OutboxPublisher {
 	private final OutboxMessageRepository repository;
 	private final RabbitTemplate rabbitTemplate;
 	private final CamundaEventsRabbitProperties properties;
+	private final MeterRegistry meterRegistry;
 
 	/**
 	 * Caminho da varredura agendada: recebe só o id, relê do banco antes de publicar. A
@@ -80,18 +83,30 @@ class OutboxPublisher {
 		}
 	}
 
+	/**
+	 * {@code outbox_publish_confirm_seconds}: quanto tempo cada publicação gastou esperando o
+	 * publisher-confirm do RabbitMQ, com a tag {@code confirmed} separando o que foi confirmado
+	 * do que não foi (timeout ou erro). Esse é o ponto mais provável de virar gargalo sob carga —
+	 * é a única espera de rede síncrona no caminho inteiro do outbox.
+	 */
 	private boolean publishWithConfirm(OutboxMessage message) {
+		Timer.Sample sample = Timer.start(meterRegistry);
+		boolean confirmed = false;
 		try {
-			Boolean confirmed = rabbitTemplate.invoke(operations -> {
+			Boolean result = rabbitTemplate.invoke(operations -> {
 				operations.convertAndSend(properties.getExchange(), message.getProcessDefinitionKey(),
 						message.getPayload(), asJsonMessage());
 				return operations.waitForConfirms(properties.getPublishConfirmTimeout().toMillis());
 			});
-			return Boolean.TRUE.equals(confirmed);
+			confirmed = Boolean.TRUE.equals(result);
+			return confirmed;
 		}
 		catch (Exception e) {
 			log.error("Falha publicando mensagem outbox {} - sera retentada no proximo ciclo", message.getId(), e);
 			return false;
+		}
+		finally {
+			sample.stop(meterRegistry.timer("outbox.publish.confirm", "confirmed", String.valueOf(confirmed)));
 		}
 	}
 

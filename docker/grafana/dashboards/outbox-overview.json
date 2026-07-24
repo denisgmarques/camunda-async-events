@@ -1,0 +1,85 @@
+{
+  "title": "Camunda Async Events - Outbox Overview",
+  "uid": "outbox-overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Outbox backlog (linhas pendentes em outbox_message)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "expr": "outbox_backlog_size", "legendFormat": "backlog" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Latencia do publisher-confirm (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(outbox_publish_confirm_seconds_bucket[1m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(outbox_publish_confirm_seconds_bucket[1m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(outbox_publish_confirm_seconds_bucket[1m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Taxa de publish (confirmado vs nao confirmado)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "expr": "sum(rate(outbox_publish_confirm_seconds_count[1m])) by (confirmed)", "legendFormat": "confirmed={{confirmed}}" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Duracao do ciclo da varredura agendada (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(outbox_relay_sweep_seconds_bucket[1m])) by (le))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "HikariCP - conexoes ativas / em espera",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "expr": "hikaricp_connections_active", "legendFormat": "active" },
+        { "expr": "hikaricp_connections_pending", "legendFormat": "pending (esperando conexao)" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "HTTP - taxa de requisicoes por endpoint",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "expr": "sum(rate(http_server_requests_seconds_count[1m])) by (uri, status)", "legendFormat": "{{uri}} [{{status}}]" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "JVM - heap usado",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "expr": "sum(jvm_memory_used_bytes{area=\"heap\"})", "legendFormat": "heap usado" },
+        { "expr": "sum(jvm_memory_max_bytes{area=\"heap\"})", "legendFormat": "heap maximo" }
+      ]
+    }
+  ]
+}

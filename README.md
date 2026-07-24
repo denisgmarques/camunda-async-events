@@ -33,6 +33,7 @@ where the line between "the pattern is right" and "this specific code is deploya
 - [BPMN testing strategy](#bpmn-testing-strategy)
 - [End-to-end integration test](#end-to-end-integration-test)
 - [Running it locally](#running-it-locally)
+- [Monitoring and load testing](#monitoring-and-load-testing)
 - [Known limitations / trade-offs](#known-limitations--trade-offs)
 
 ---
@@ -493,6 +494,70 @@ Or run everything, including the [end-to-end integration test](#end-to-end-integ
 ```bash
 ./mvnw verify
 ```
+
+## Monitoring and load testing
+
+The app exposes Micrometer/Prometheus metrics via Spring Boot Actuator, with three custom ones
+built specifically to answer "where's the bottleneck in *this* architecture" — generic JVM stats
+don't, but these do:
+
+| Metric | What it tells you |
+|---|---|
+| `outbox_backlog_size` | Rows currently sitting in `outbox_message`. If this climbs and doesn't come back down, production is outrunning the relay. |
+| `outbox_publish_confirm_seconds` | How long each publish waited for RabbitMQ's publisher-confirm, tagged `confirmed=true/false`. The only synchronous network wait in the whole outbox path — the most likely place a bottleneck actually lives. |
+| `outbox_relay_sweep_seconds` | How long each scheduled sweep cycle took. |
+
+**1. Bring up Prometheus + Grafana** (alongside RabbitMQ, already in `docker-compose.yml`):
+
+```bash
+docker compose up -d
+```
+
+Prometheus and Grafana run with `network_mode: host` on purpose — the app itself runs on the
+host (`./mvnw spring-boot:run`), not in this compose file, and having the containers scrape
+`localhost:8080` directly sidesteps a real gotcha: reaching a host port from a container normally
+goes through Docker's bridge network, and on Linux a host firewall can silently drop that
+traffic (the scrape just times out, no clear error). Host networking has no bridge to cross.
+(Linux-only for this reason — Docker Desktop on Mac/Windows doesn't support host mode.)
+
+**2. Run the app** — Grafana at `http://localhost:3000` (dashboard "Camunda Async Events - Outbox
+Overview" is provisioned automatically, no login needed) and Prometheus at
+`http://localhost:9090`:
+
+```bash
+./mvnw spring-boot:run
+```
+
+**3. Generate load.** The BPMN's `ViaCepDelegate` calls the real ViaCEP API by design (see
+[above](#end-to-end-integration-test)) — fine for one request, not for a stress test, which would
+just get rate-limited by ViaCEP within seconds and stop measuring anything about *this*
+application. Run with the `loadtest` profile instead, which swaps in `LoadTestViaCepDelegate`
+(same bean name, no network call):
+
+```bash
+./mvnw spring-boot:run -Dspring-boot.run.profiles=loadtest
+```
+
+Then, with [k6](https://k6.io/) installed, run the ramping-load scenario in `loadtest/stress-test.js`
+(0 → 10 → 50 virtual users over ~4 minutes — see the file for the exact stages):
+
+```bash
+k6 run loadtest/stress-test.js
+```
+
+Watch the Grafana dashboard while it runs. The `outbox_publish_confirm_seconds` p95/p99 panel and
+the backlog panel are the ones to watch — if backlog keeps climbing while p95 latency is flat,
+the relay's throughput (not RabbitMQ) is the limit; if p95 latency climbs first, the wait for
+RabbitMQ's confirm is. Deliberately a *ramping* scenario rather than an unbounded one: constant
+maximum load doesn't tell you where the limit is, only that one exists, and every process
+instance created leaves a permanent row in `processed_transaction` (see
+[Known limitations](#known-limitations--trade-offs)) — an open-ended run just inflates that table
+forever without producing a more useful answer. Since everything else here is H2 in-memory,
+restarting the app resets it all; each run is disposable.
+
+Exposing `/actuator/*` without authentication is fine for this — local monitoring during a load
+test — and is one more instance of the same thing the rest of this README keeps saying:
+reference architecture, not a production configuration.
 
 ## Known limitations / trade-offs
 

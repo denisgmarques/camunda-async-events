@@ -35,6 +35,7 @@ fica a linha entre "o padrão está certo" e "esse código específico está pro
 - [Estratégia de testes de BPMN](#estratégia-de-testes-de-bpmn)
 - [Teste de integração de ponta a ponta](#teste-de-integração-de-ponta-a-ponta)
 - [Rodando localmente](#rodando-localmente)
+- [Monitoramento e teste de carga](#monitoramento-e-teste-de-carga)
 - [Limitações conhecidas / trade-offs](#limitações-conhecidas--trade-offs)
 
 ---
@@ -507,6 +508,72 @@ Ou rodar tudo, incluindo o [teste de integração de ponta a ponta](#teste-de-in
 ```bash
 ./mvnw verify
 ```
+
+## Monitoramento e teste de carga
+
+A aplicação expõe métricas Micrometer/Prometheus via Spring Boot Actuator, com três customizadas
+feitas especificamente pra responder "onde está o gargalo *desta* arquitetura" — métrica genérica
+de JVM não responde isso, essas sim:
+
+| Métrica | O que ela mostra |
+|---|---|
+| `outbox_backlog_size` | Quantas linhas existem agora em `outbox_message`. Se isso sobe e não volta, a produção de eventos está passando o relay pra trás. |
+| `outbox_publish_confirm_seconds` | Quanto tempo cada publish esperou pelo publisher-confirm do RabbitMQ, com a tag `confirmed=true/false`. A única espera síncrona de rede em todo o caminho do outbox — o lugar mais provável de um gargalo estar de verdade. |
+| `outbox_relay_sweep_seconds` | Quanto tempo cada ciclo da varredura agendada levou. |
+
+**1. Suba Prometheus + Grafana** (junto com o RabbitMQ, já no `docker-compose.yml`):
+
+```bash
+docker compose up -d
+```
+
+Prometheus e Grafana rodam com `network_mode: host` de propósito — a aplicação em si roda no
+host (`./mvnw spring-boot:run`), não neste compose, e fazer os containers raspar
+`localhost:8080` diretamente evita uma pegadinha real: alcançar uma porta do host a partir de um
+container normalmente passa pela bridge do Docker, e no Linux um firewall do host pode derrubar
+esse tráfego silenciosamente (o scrape só dá timeout, sem erro claro). Rede em modo host não tem
+bridge nenhuma pra cruzar. (Só funciona em Linux por esse motivo — Docker Desktop no Mac/Windows
+não suporta modo host.)
+
+**2. Rode a aplicação** — Grafana em `http://localhost:3000` (o dashboard "Camunda Async Events -
+Outbox Overview" já vem provisionado automaticamente, sem precisar logar) e Prometheus em
+`http://localhost:9090`:
+
+```bash
+./mvnw spring-boot:run
+```
+
+**3. Gere carga.** O `ViaCepDelegate` do BPMN chama a API real do ViaCEP de propósito (ver
+[acima](#teste-de-integração-de-ponta-a-ponta)) — tranquilo pra uma requisição, não pra um teste
+de estresse, que ia só bater rate limit no ViaCEP em segundos e parar de medir qualquer coisa
+sobre *esta* aplicação. Rode com o profile `loadtest` em vez disso, que troca pro
+`LoadTestViaCepDelegate` (mesmo bean name, sem chamada de rede):
+
+```bash
+./mvnw spring-boot:run -Dspring-boot.run.profiles=loadtest
+```
+
+Depois, com o [k6](https://k6.io/) instalado, rode o cenário de rampa em
+`loadtest/stress-test.js` (0 → 10 → 50 usuários virtuais ao longo de ~4 minutos — veja o arquivo
+pros estágios exatos):
+
+```bash
+k6 run loadtest/stress-test.js
+```
+
+Acompanhe o dashboard do Grafana enquanto roda. Os painéis de p95/p99 do
+`outbox_publish_confirm_seconds` e o de backlog são os que importam — se o backlog continua
+subindo com a latência p95 estável, o limite é o throughput do relay (não o RabbitMQ); se a
+latência p95 sobe primeiro, o limite é a espera pela confirmação do RabbitMQ. É um cenário de
+**rampa** de propósito, não sem fim: carga máxima constante não te diz onde está o limite, só que
+ele existe, e cada instância de processo criada deixa uma linha permanente em
+`processed_transaction` (ver [Limitações conhecidas](#limitações-conhecidas--trade-offs)) — uma
+execução sem fim só infla essa tabela pra sempre sem produzir uma resposta melhor. Como o resto
+daqui é H2 em memória, reiniciar a aplicação zera tudo; cada rodada é descartável.
+
+Expor `/actuator/*` sem autenticação é aceitável aqui — monitoramento local durante um teste de
+carga — e é mais uma instância da mesma coisa que o resto deste README já vem dizendo: modelo de
+referência de arquitetura, não uma configuração de produção.
 
 ## Limitações conhecidas / trade-offs
 
