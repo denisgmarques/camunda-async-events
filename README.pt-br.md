@@ -9,8 +9,8 @@ um consumidor idempotente.
 
 É construído deliberadamente como uma demonstração: os processos BPMN são simples (um cadastro de
 cliente que busca o endereço a partir do CEP), mas a engrenagem ao redor deles — transação, retry,
-dead-lettering, idempotência — foi construída e testada com um *padrão de correção* de nível
-produtivo.
+dead-lettering, idempotência — foi construída e testada com um *padrão já validado* em
+produção.
 
 **Isso é um modelo de referência de arquitetura, não um artefato pronto pra produção.** Os
 padrões, os limites de transação e o raciocínio sobre modos de falha é o que vale a pena levar
