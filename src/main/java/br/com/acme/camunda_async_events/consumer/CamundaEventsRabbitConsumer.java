@@ -37,7 +37,7 @@ import java.util.Map;
 @Component
 @Slf4j
 @RequiredArgsConstructor
-public class CamundaEventListener {
+public class CamundaEventsRabbitConsumer {
 
 	private final ProcessedTransactionRepository processedTransactionRepository;
 	private final ObjectMapper objectMapper;

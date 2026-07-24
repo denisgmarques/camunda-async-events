@@ -120,7 +120,7 @@ flowchart LR
     end
 
     subgraph consumer["Consumidor"]
-        listener["CamundaEventListener"]
+        listener["CamundaEventsRabbitConsumer"]
         processed[("processed_transaction\n(H2)")]
     end
 
@@ -250,7 +250,7 @@ como rede de segurança — cobre o caso em que a aplicação caiu antes do disp
 publica cada uma no exchange `camunda.events` usando a chave do processo como routing key, e só
 marca a linha como `SENT` depois que o RabbitMQ **confirma** a publicação.
 
-**6. O `CamundaEventListener` consome as duas mensagens.** Para cada uma ele calcula a chave de
+**6. O `CamundaEventsRabbitConsumer` consome as duas mensagens.** Para cada uma ele calcula a chave de
 idempotência `(transactionId, processInstanceId)`, checa `processed_transaction`, e — como nenhum
 dos dois pares já foi visto — processa e grava a chave. Se qualquer uma das mensagens fosse
 reentregue depois (reinício do broker, requeue, o que for), a segunda tentativa encontraria a linha
@@ -315,7 +315,7 @@ tentativas por padrão)?** Eles resolvem problemas diferentes e não conflitam:
 flowchart LR
     pub["OutboxPublisher"] -->|"routing key = processDefinitionKey"| ex(("camunda.events\ntopic exchange"))
     ex -->|"#"| q["camunda.events.queue"]
-    q --> listener["CamundaEventListener"]
+    q --> listener["CamundaEventsRabbitConsumer"]
     listener -- "processamento lança exceção → nack, sem requeue" --> q
     q -. "dead-letter" .-> rex(("camunda.events.retry\ndirect exchange"))
     rex --> rq["camunda.events.retry.queue\nx-message-ttl = 10000ms"]
@@ -332,7 +332,7 @@ nenhum plugin do RabbitMQ, só filas e exchanges duráveis (veja `RabbitMQTopolo
 2. A fila de retry não tem consumidor — as mensagens simplesmente ficam lá até o
    `x-message-ttl` (10 segundos) expirar, momento em que *sua própria* dead-letter-exchange as
    manda de volta direto pro exchange principal para uma nova tentativa.
-3. O `CamundaEventListener` inspeciona o cabeçalho `x-death` (que o RabbitMQ incrementa toda vez
+3. O `CamundaEventsRabbitConsumer` inspeciona o cabeçalho `x-death` (que o RabbitMQ incrementa toda vez
    que uma mensagem é dead-lettered) para saber quantas vezes a mensagem já falhou na fila
    principal. Abaixo de 5, deixa o nack acontecer de novo. Na 5ª falha, em vez de dar nack (o que a
    faria ricochetear pela fila de retry mais uma vez), ele publica a mensagem diretamente no
@@ -344,7 +344,7 @@ nenhum plugin do RabbitMQ, só filas e exchanges duráveis (veja `RabbitMQTopolo
 |---|---|
 | **Transactional Outbox** | Tabela `outbox_message`, gravada na mesma transação de banco do comando do Camunda (`HistoryEventTransactionSynchronization`) |
 | **Polling Publisher** (+ disparo de baixa latência) | `OutboxRelay` — varredura agendada a cada 5s, mais um disparo assíncrono logo após o commit |
-| **Idempotent Consumer** | `CamundaEventListener` + `processed_transaction`, chaveado por `(transactionId, processInstanceId)` |
+| **Idempotent Consumer** | `CamundaEventsRabbitConsumer` + `processed_transaction`, chaveado por `(transactionId, processInstanceId)` |
 | **Retry com backoff + Dead Letter Queue** | Topologia de ricochete TTL/DLX do RabbitMQ, contagem de tentativas baseada em `x-death` |
 | **Loop de retentativa via Boundary Error Event do BPMN** (retentativa em nível de negócio) | `consultaCepProcess` — uma retentativa visível ao negócio, com cadência própria, deliberadamente desacoplada do retry técnico de job do Camunda |
 | **Composição de processos via CallActivity** | `cadastroClienteProcess` chamando `consultaCepProcess`, com mapeamento explícito de variáveis `camunda:in`/`camunda:out` |
@@ -424,7 +424,7 @@ curl -X POST http://localhost:8080/engine-rest/process-definition/key/cadastroCl
 
 Depois é só acompanhar o fluxo: management UI do RabbitMQ (`camunda.events.queue`,
 `camunda.events.retry.queue`, `camunda.events.dlq.queue`) e os logs da aplicação
-(`CamundaEventListener` loga toda mensagem que processa ou ignora por já ter sido processada).
+(`CamundaEventsRabbitConsumer` loga toda mensagem que processa ou ignora por já ter sido processada).
 
 Rodar a suíte de testes de BPMN:
 

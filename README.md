@@ -116,7 +116,7 @@ flowchart LR
     end
 
     subgraph consumer["Consumer"]
-        listener["CamundaEventListener"]
+        listener["CamundaEventsRabbitConsumer"]
         processed[("processed_transaction\n(H2)")]
     end
 
@@ -245,7 +245,7 @@ covers the case where the app crashed before the async kick ran), publishes each
 `camunda.events` exchange with the process definition key as routing key, and only flips the row
 to `SENT` after RabbitMQ **confirms** the publish.
 
-**6. `CamundaEventListener` consumes both messages.** For each one it computes the idempotency key
+**6. `CamundaEventsRabbitConsumer` consumes both messages.** For each one it computes the idempotency key
 `(transactionId, processInstanceId)`, checks `processed_transaction`, and — since neither pair has
 been seen before — processes it and records the key. If either message were redelivered later
 (broker restart, requeue, whatever), the second attempt would find the row already there and skip
@@ -308,7 +308,7 @@ default)?** They solve different problems and don't conflict:
 flowchart LR
     pub["OutboxPublisher"] -->|"routing key = processDefinitionKey"| ex(("camunda.events\ntopic exchange"))
     ex -->|"#"| q["camunda.events.queue"]
-    q --> listener["CamundaEventListener"]
+    q --> listener["CamundaEventsRabbitConsumer"]
     listener -- "processing throws → nack, no requeue" --> q
     q -. "dead-lettered" .-> rex(("camunda.events.retry\ndirect exchange"))
     rex --> rq["camunda.events.retry.queue\nx-message-ttl = 10000ms"]
@@ -325,7 +325,7 @@ just durable queues and exchanges (see `RabbitMQTopologyConfig`):
 2. The retry queue doesn't have a consumer — messages just sit there until their
    `x-message-ttl` (10 seconds) expires, at which point *its* dead-letter-exchange sends them
    straight back to the main exchange for another attempt.
-3. `CamundaEventListener` inspects the `x-death` header (which RabbitMQ increments every time a
+3. `CamundaEventsRabbitConsumer` inspects the `x-death` header (which RabbitMQ increments every time a
    message is dead-lettered) to know how many times the message has already failed on the main
    queue. Below 5, it lets the nack happen again. On the 5th failure, instead of nacking (which
    would bounce it through the retry queue yet again), it explicitly publishes the message to the
@@ -337,7 +337,7 @@ just durable queues and exchanges (see `RabbitMQTopologyConfig`):
 |---|---|
 | **Transactional Outbox** | `outbox_message` table, written in the same DB transaction as the Camunda command (`HistoryEventTransactionSynchronization`) |
 | **Polling Publisher** (+ low-latency trigger) | `OutboxRelay` — scheduled sweep every 5s, plus an async kick right after commit |
-| **Idempotent Consumer** | `CamundaEventListener` + `processed_transaction`, keyed by `(transactionId, processInstanceId)` |
+| **Idempotent Consumer** | `CamundaEventsRabbitConsumer` + `processed_transaction`, keyed by `(transactionId, processInstanceId)` |
 | **Retry with backoff + Dead Letter Queue** | RabbitMQ TTL/DLX bounce topology, `x-death`-based attempt counting |
 | **BPMN Boundary Error Event retry loop** (business-level retry) | `consultaCepProcess` — a business-visible, independently-timed retry, deliberately decoupled from Camunda's technical job retry |
 | **Process composition via CallActivity** | `cadastroClienteProcess` calling `consultaCepProcess`, with explicit `camunda:in`/`camunda:out` variable mapping |
@@ -414,7 +414,7 @@ curl -X POST http://localhost:8080/engine-rest/process-definition/key/cadastroCl
 ```
 
 Then watch it flow: RabbitMQ management UI (`camunda.events.queue`, `camunda.events.retry.queue`,
-`camunda.events.dlq.queue`) and the application logs (`CamundaEventListener` logs every message it
+`camunda.events.dlq.queue`) and the application logs (`CamundaEventsRabbitConsumer` logs every message it
 processes or skips as a duplicate).
 
 Run the BPMN test suite:
