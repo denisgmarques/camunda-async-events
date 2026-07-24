@@ -50,11 +50,13 @@ class OutboxPublisher {
 
 	/**
 	 * Caminho de baixa latência pós-commit: recebe a entidade que a própria transação acabou
-	 * de gravar (ainda com o payload em memória, sem SELECT). Seguro sem reconferir se a linha
-	 * ainda existe porque {@link OutboxRelay#triggerAsync(List)} e
-	 * {@link OutboxRelay#relayPendingMessages()} são {@code synchronized} no mesmo monitor —
-	 * dentro desta JVM não existe outra chamada concorrente que possa ter publicado (e apagado)
-	 * esta linha antes.
+	 * de gravar (ainda com o payload em memória, sem SELECT). Não confere se a linha ainda
+	 * existe antes de publicar — de propósito, ver o javadoc de {@link OutboxRelay}. Na rara
+	 * corrida onde a varredura agendada já publicou e apagou esta mesma linha antes desta
+	 * chamada rodar, o pior cenário é uma publicação duplicada no RabbitMQ (absorvida pelo
+	 * consumidor idempotente) seguida de um {@code DELETE} que não bate em linha nenhuma — o
+	 * {@link OutboxMessageRepository#deleteById(Long)} sobrescrito é um {@code DELETE} puro em
+	 * JPQL, não lança exceção quando zero linhas são afetadas.
 	 */
 	@Transactional(propagation = Propagation.REQUIRES_NEW)
 	public void publish(OutboxMessage message) {

@@ -511,15 +511,20 @@ more than it does.
   - `OutboxRelay.relayPendingMessages()`, the scheduled sweep, still has to query broadly
     (`findAllByOrderById()`, no origin filter, no status to filter by since there isn't one) —
     that's the only way a surviving instance can rescue a row an instance that crashed mid-flight
-    never got to publish. Run two instances and the sweep in both can pick up the same orphaned
-    row at the same time — not incorrect end-to-end (the consumer is idempotent) but wasteful,
-    and it's a real race the `synchronized` keyword only closes **within one JVM**, not across
-    instances.
+    never got to publish. Run two instances (or even just the sweep racing the low-latency path
+    for the same freshly-committed row *within* one instance) and both can try to publish the
+    same row at the same time — not incorrect end-to-end (the consumer is idempotent, and the
+    delete that follows is a plain `DELETE ... WHERE id = ?` that no-ops harmlessly if the row is
+    already gone) but wasteful. Deliberately left unguarded, even within a single JVM: a lock here
+    would have to wrap the RabbitMQ publish-confirm wait itself, serializing every commit's publish
+    behind whatever else happens to be publishing at that moment — a bigger cost than the rare
+    duplicate it would prevent, especially since that same duplicate is already tolerated,
+    unguarded, across instances.
   - That same sweep query has no `LIMIT`/pagination — every cycle loads *all* remaining rows into
     memory. Fine at demo volume; a real backlog (e.g. after a broker outage) needs batching.
   - Getting the sweep to real multi-instance horizontal scaling means row-level claiming (e.g.
-    `SELECT ... FOR UPDATE SKIP LOCKED`) instead of the current `synchronized` method, plus a
-    bounded query.
+    `SELECT ... FOR UPDATE SKIP LOCKED`) instead of the current unguarded read, plus a bounded
+    query.
 - **No schema migrations.** `spring.jpa.hibernate.ddl-auto=update` against H2 in-memory is
   convenient for a demo that resets on every run; a real deployment needs Flyway/Liquibase.
   (`outbox_message` doesn't need an extra index for the sweep's query — it just orders by the

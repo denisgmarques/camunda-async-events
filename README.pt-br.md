@@ -524,16 +524,22 @@ sugerir mais do que de fato entrega.
   - `OutboxRelay.relayPendingMessages()`, a varredura agendada, ainda precisa consultar de forma
     ampla (`findAllByOrderById()`, sem filtro de origem, sem status pra filtrar porque não existe
     mais um) — é o único jeito de uma instância sobrevivente resgatar uma linha que outra
-    instância, ao cair no meio do caminho, nunca chegou a publicar. Suba duas instâncias e a
-    varredura das duas pode pegar a mesma linha órfã ao mesmo tempo — não incorreto de ponta a
-    ponta (o consumidor é idempotente), mas desperdiçado, e é uma corrida real que o
-    `synchronized` só fecha **dentro de uma mesma JVM**, não entre instâncias.
+    instância, ao cair no meio do caminho, nunca chegou a publicar. Suba duas instâncias (ou até
+    só a varredura correndo contra o caminho de baixa latência da mesma linha recém-commitada,
+    **dentro** de uma única instância) e as duas podem tentar publicar a mesma linha ao mesmo
+    tempo — não incorreto de ponta a ponta (o consumidor é idempotente, e o delete que vem depois
+    é um `DELETE ... WHERE id = ?` que não faz nada se a linha já sumiu), mas desperdiçado.
+    Deixado sem lock de propósito, mesmo dentro de uma única JVM: um lock aqui teria que envolver
+    a própria espera pelo publisher-confirm do RabbitMQ, serializando o publish de todo commit
+    atrás de qualquer outra publicação em andamento — um custo maior que a duplicata rara que
+    evitaria, ainda mais porque essa mesma duplicata já é tolerada, sem lock nenhum, entre
+    instâncias.
   - Essa mesma query da varredura não tem `LIMIT`/paginação — cada ciclo carrega *todas* as linhas
     que sobrarem pra memória. Tranquilo no volume da demo; um backlog real (ex.: depois de uma
     queda do broker) precisa de lotes.
   - Levar a varredura a um escalonamento horizontal multi-instância de verdade exige captura em
-    nível de linha (ex.: `SELECT ... FOR UPDATE SKIP LOCKED`) no lugar do método `synchronized`
-    atual, mais uma query limitada.
+    nível de linha (ex.: `SELECT ... FOR UPDATE SKIP LOCKED`) no lugar da leitura sem lock atual,
+    mais uma query limitada.
 - **Sem migração de schema.** `spring.jpa.hibernate.ddl-auto=update` contra H2 em memória é
   conveniente pra uma demo que reseta a cada execução; um deploy real precisa de Flyway/Liquibase.
   (`outbox_message` não precisa de um índice extra pra query da varredura — ela só ordena pela

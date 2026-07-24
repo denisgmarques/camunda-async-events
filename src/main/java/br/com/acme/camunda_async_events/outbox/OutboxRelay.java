@@ -9,26 +9,34 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 
 /**
- * Publica mensagens outbox no RabbitMQ por dois caminhos, ambos serializados pelo mesmo
- * monitor (os dois métodos são {@code synchronized} na mesma instância) para nunca rodar ao
- * mesmo tempo dentro desta JVM:
+ * Publica mensagens outbox no RabbitMQ por dois caminhos. Nenhum dos dois é {@code synchronized}
+ * — de propósito, apesar de {@link OutboxRelay} ser um singleton do Spring compartilhado por toda
+ * transação e pela varredura agendada:
  *
  * <ul>
  *   <li>{@link #triggerAsync(List)} — disparo de baixa latência logo após o commit, publica
  *   <b>as entidades que a própria transação acabou de gravar</b> (recebidas em memória, sem
- *   SELECT nenhum) em vez de consultar o banco por tudo que ainda está pendente. Isso é o que
- *   garante que uma JVM nunca mexe em linhas escritas por outra transação/instância no caminho
- *   comum (broker saudável): cada instância só publica o que ela mesma produziu, ninguém disputa
- *   a mesma linha, e nem precisa reler o que acabou de escrever.</li>
+ *   SELECT nenhum) em vez de consultar o banco por tudo que ainda está pendente. Transações
+ *   diferentes chamam isso concorrentemente o tempo todo — sem problema, cada uma só enxerga e
+ *   publica as próprias linhas, nunca as de outra.</li>
  *   <li>{@link #relayPendingMessages()} — rede de segurança agendada, varre TODAS as linhas que
  *   ainda existem na tabela (de qualquer origem — não há mais coluna de status: a linha some
  *   assim que é confirmada, então "existir" já é o único estado pendente). Precisa ser ampla
  *   assim de propósito: é o único jeito de uma instância sobrevivente resgatar uma linha que
- *   outra JVM escreveu e não chegou a publicar antes de cair (crash entre o insert e o disparo
- *   assíncrono, ou o broker fora do ar por tempo suficiente). Restringir esse caminho também
- *   por origem devolveria a garantia de "sem corrida", mas quebraria a recuperação — a linha
- *   órfã nunca mais seria reenviada por ninguém.</li>
+ *   outra JVM escreveu e não chegou a publicar antes de cair.</li>
  * </ul>
+ *
+ * <p>O único cenário onde os dois caminhos podem mesmo disputar a mesma linha é uma corrida bem
+ * estreita: a varredura pega uma linha no instante em que o disparo de baixa latência daquela
+ * mesma transação também está processando ela. Isso <b>não</b> foi resolvido com um lock —
+ * de propósito. Um {@code synchronized} aqui protegeria o publish inteiro, incluindo a espera
+ * pelo publisher-confirm do RabbitMQ (até {@code publish-confirm-timeout}, alguns segundos), o
+ * que serializaria toda transação atrás de qualquer outra publicação em andamento, mesmo mexendo
+ * em linhas totalmente diferentes — o oposto do que "baixa latência" deveria significar. E o
+ * problema que ele evitaria já é tolerado sem lock nenhum entre JVMs diferentes (ver
+ * "Known limitations" no README): o consumidor é idempotente, absorve a publicação duplicada;
+ * pagar o custo de serializar I/O só pra evitar a mesma duplicata dentro de uma única JVM não é
+ * consistente com essa decisão.
  */
 @Component
 @Slf4j
@@ -39,7 +47,7 @@ public class OutboxRelay {
 	private final OutboxPublisher publisher;
 
 	@Scheduled(fixedDelayString = "${camunda.events.rabbitmq.relay-interval-ms:5000}")
-	public synchronized void relayPendingMessages() {
+	public void relayPendingMessages() {
 		List<OutboxMessage> pending = repository.findAllByOrderById();
 		if (pending.isEmpty()) {
 			return;
@@ -57,7 +65,7 @@ public class OutboxRelay {
 	 * seu, sem reler nada, e disputar linha por linha com outras instâncias.
 	 */
 	@Async
-	public synchronized void triggerAsync(List<OutboxMessage> outboxMessages) {
+	public void triggerAsync(List<OutboxMessage> outboxMessages) {
 		if (outboxMessages.isEmpty()) {
 			return;
 		}
