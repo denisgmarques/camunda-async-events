@@ -61,7 +61,7 @@ diretamente ao ciclo de vida da própria transação do Camunda:
   relay em segundo plano (com um "empurrão" de baixa latência logo após o commit, mais uma
   varredura periódica de segurança) publica as linhas pendentes e só as marca como `SENT` depois
   que o RabbitMQ **confirma** o recebimento.
-- Do lado de quem recebe, o RabbitMQ está configurado com uma topologia de verdade de
+- Do lado de quem recebe, o RabbitMQ está configurado com uma topologia real de
   retry-com-backoff-depois-DLQ (5 tentativas, 10 segundos entre elas, sem precisar de plugins), e o
   consumidor é **idempotente**: toda mensagem carrega o id da transação (e da instância de
   processo) que a gerou, e o consumidor grava esse id antes de considerar a mensagem tratada — para
@@ -181,7 +181,7 @@ acumula esse evento, e bem antes do commit ele é gravado no outbox como uma men
 
 **3. O job executor pega o job da CallActivity.** É aqui que fica interessante: entrar na
 `CallActivity` **de forma síncrona** inicia uma instância de processo totalmente separada
-(`consultaCepProcess`), executa a `ViaCepDelegate` (uma chamada HTTP de verdade para o ViaCEP) e —
+(`consultaCepProcess`), executa a `ViaCepDelegate` (uma chamada HTTP real para o ViaCEP) e —
 em caso de sucesso — devolve o controle para o processo pai, que segue para a tarefa humana
 "Avaliar Cadastro" (um estado de espera). **Tudo isso acontece numa única transação de banco**
 (`T2`), porque nada nessa cadeia é assíncrono. Essa única transação produz eventos de história para
@@ -257,11 +257,11 @@ dos dois pares já foi visto — processa e grava a chave. Se qualquer uma das m
 reentregue depois (reinício do broker, requeue, o que for), a segunda tentativa encontraria a linha
 já lá e pularia direto, registrando no log que foi ignorada.
 
-Esse é exatamente o cenário que expôs um bug de verdade enquanto este projeto era construído: a
+Esse é exatamente o cenário que expôs um bug real enquanto este projeto era construído: a
 primeira versão de `processed_transaction` era chaveada só pelo `transactionId`. Como a mensagem A
 e a mensagem B acima compartilham o mesmo `transactionId`, o consumidor tratava
 *incorretamente* a mensagem B como duplicata da mensagem A e a descartava silenciosamente — um
-evento de negócio de verdade, perdido, só porque duas instâncias de processo diferentes nasceram do
+evento de negócio real, perdido, só porque duas instâncias de processo diferentes nasceram do
 mesmo commit. A correção foi direta assim que encontrada: chavear a idempotência pelo par, não só
 pela transação.
 
@@ -411,7 +411,7 @@ O que está coberto:
 
 ## Teste de integração de ponta a ponta
 
-O `CamundaAsyncEventsEndToEndIT` é o teste que prova de verdade o pipeline do
+O `CamundaAsyncEventsEndToEndIT` é o teste que comprova, contra infraestrutura real, o pipeline do
 [passo a passo](#passo-a-passo-ponta-a-ponta-quem-chama-quem-o-que-passa-por-onde) acima — sem
 mocks, sem engine standalone. Ele sobe a aplicação Spring Boot **inteira** (`@SpringBootTest`,
 container servlet real, job executor real) contra um **RabbitMQ real**, iniciado sob demanda pelo
@@ -497,5 +497,5 @@ Ou rodar tudo, incluindo o [teste de integração de ponta a ponta](#teste-de-in
   linha (ex.: `SELECT ... FOR UPDATE SKIP LOCKED`) ou um lock distribuído para escalar para
   múltiplas instâncias sem publicar a mesma linha duas vezes.
 - **A `ViaCepDelegate` chama a API real do ViaCEP** no código de produção — de propósito, para que
-  a demonstração seja de ponta a ponta de verdade; os testes a substituem por fakes, como descrito
+  a demonstração seja de ponta a ponta com infraestrutura real; os testes a substituem por fakes, como descrito
   acima.

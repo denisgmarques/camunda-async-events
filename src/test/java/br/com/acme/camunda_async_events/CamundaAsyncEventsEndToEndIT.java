@@ -32,7 +32,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 /**
- * Prova, com uma aplicação Spring Boot e um RabbitMQ <b>de verdade</b> (não mocks), a mesma
+ * Prova, com uma aplicação Spring Boot e um RabbitMQ <b>real</b> (não mocks), a mesma
  * cadeia descrita no README: Camunda captura o evento na transação &rarr; grava no outbox
  * &rarr; o relay publica com publisher-confirm &rarr; o consumidor processa de forma
  * idempotente &rarr; uma reentrega da mesma mensagem é ignorada.
