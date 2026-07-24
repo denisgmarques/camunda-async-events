@@ -507,18 +507,21 @@ don't, but these do:
 | `outbox_publish_confirm_seconds` | How long each publish waited for RabbitMQ's publisher-confirm, tagged `confirmed=true/false`. The only synchronous network wait in the whole outbox path — the most likely place a bottleneck actually lives. |
 | `outbox_relay_sweep_seconds` | How long each scheduled sweep cycle took. |
 
-**1. Bring up Prometheus + Grafana** (alongside RabbitMQ, already in `docker-compose.yml`):
+**1. Bring up Prometheus + Grafana** — kept in a separate compose file
+(`docker-compose.monitoring.yml`) from RabbitMQ's, on purpose: they're optional, only useful for
+the load test below, and shouldn't be something everyone following [Running it
+locally](#running-it-locally) has to pull and start just to see the outbox pattern work:
 
 ```bash
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 ```
 
-Prometheus and Grafana run with `network_mode: host` on purpose — the app itself runs on the
-host (`./mvnw spring-boot:run`), not in this compose file, and having the containers scrape
-`localhost:8080` directly sidesteps a real gotcha: reaching a host port from a container normally
-goes through Docker's bridge network, and on Linux a host firewall can silently drop that
-traffic (the scrape just times out, no clear error). Host networking has no bridge to cross.
-(Linux-only for this reason — Docker Desktop on Mac/Windows doesn't support host mode.)
+The app itself runs on the host (`./mvnw spring-boot:run`), not in either compose file, so
+Prometheus reaches it via `host.docker.internal` (standard Docker bridge networking, works on
+Docker Desktop out of the box; on Linux it needs the `extra_hosts: host-gateway` entry already in
+`docker-compose.monitoring.yml`). If the Prometheus target shows as down and the scrape just times
+out with no clear error, check the host's firewall rules (e.g. `ufw`) for anything blocking
+container→host traffic forwarded over the bridge — that's the most likely cause on Linux.
 
 **2. Run the app** — Grafana at `http://localhost:3000` (dashboard "Camunda Async Events - Outbox
 Overview" is provisioned automatically, no login needed) and Prometheus at

@@ -179,7 +179,7 @@ round 3) to remove the shared-hardware confound entirely.
 manually:
 
 ```bash
-docker compose up -d                                          # RabbitMQ + Prometheus + Grafana
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d  # RabbitMQ + Prometheus + Grafana
 ./mvnw spring-boot:run -Dspring-boot.run.profiles=loadtest     # fake ViaCEP, real everything else
 k6 run loadtest/stress-test.js                                 # ~4m30s
 

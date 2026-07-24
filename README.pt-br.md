@@ -521,19 +521,21 @@ de JVM não responde isso, essas sim:
 | `outbox_publish_confirm_seconds` | Quanto tempo cada publish esperou pelo publisher-confirm do RabbitMQ, com a tag `confirmed=true/false`. A única espera síncrona de rede em todo o caminho do outbox — o lugar mais provável de um gargalo estar de verdade. |
 | `outbox_relay_sweep_seconds` | Quanto tempo cada ciclo da varredura agendada levou. |
 
-**1. Suba Prometheus + Grafana** (junto com o RabbitMQ, já no `docker-compose.yml`):
+**1. Suba Prometheus + Grafana** — mantidos num compose separado
+(`docker-compose.monitoring.yml`) do RabbitMQ, de propósito: são opcionais, só servem pro teste
+de carga abaixo, e ninguém seguindo [Rodando localmente](#rodando-localmente) deveria precisar
+baixar e subir esses dois containers só pra ver o padrão outbox funcionando:
 
 ```bash
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 ```
 
-Prometheus e Grafana rodam com `network_mode: host` de propósito — a aplicação em si roda no
-host (`./mvnw spring-boot:run`), não neste compose, e fazer os containers raspar
-`localhost:8080` diretamente evita uma pegadinha real: alcançar uma porta do host a partir de um
-container normalmente passa pela bridge do Docker, e no Linux um firewall do host pode derrubar
-esse tráfego silenciosamente (o scrape só dá timeout, sem erro claro). Rede em modo host não tem
-bridge nenhuma pra cruzar. (Só funciona em Linux por esse motivo — Docker Desktop no Mac/Windows
-não suporta modo host.)
+A aplicação em si roda no host (`./mvnw spring-boot:run`), não em nenhum dos dois compose, então
+o Prometheus alcança ela via `host.docker.internal` (rede bridge padrão do Docker, funciona de
+graça no Docker Desktop; no Linux precisa da entrada `extra_hosts: host-gateway` que já está no
+`docker-compose.monitoring.yml`). Se o target do Prometheus aparecer como down e o scrape só der
+timeout sem erro claro, confira as regras de firewall do host (ex.: `ufw`) por algo bloqueando
+tráfego container→host encaminhado pela bridge — é a causa mais provável no Linux.
 
 **2. Rode a aplicação** — Grafana em `http://localhost:3000` (o dashboard "Camunda Async Events -
 Outbox Overview" já vem provisionado automaticamente, sem precisar logar) e Prometheus em

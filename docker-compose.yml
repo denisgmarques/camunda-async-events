@@ -16,33 +16,5 @@ services:
       timeout: 5s
       retries: 5
 
-  prometheus:
-    image: prom/prometheus:v2.55.1
-    container_name: camunda-async-events-prometheus
-    # network_mode: host, de proposito: a aplicacao roda no host (./mvnw spring-boot:run), nao
-    # neste compose. A alternativa (host.docker.internal + extra_hosts: host-gateway) depende de
-    # trafego container->host atravessar a bridge do Docker, o que alguns firewalls de host
-    # (ufw, etc.) bloqueiam sem aviso - o scrape so fica com timeout, sem erro claro. Em modo
-    # host nao existe bridge nenhuma pra cruzar: Prometheus enxerga "localhost:8080" igual ao
-    # host enxerga. So funciona em Linux (Docker Desktop no Mac/Windows nao suporta host mode).
-    network_mode: host
-    volumes:
-      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-
-  grafana:
-    image: grafana/grafana:11.3.1
-    container_name: camunda-async-events-grafana
-    # Mesmo motivo do prometheus acima - e precisa pra alcancar o Prometheus em localhost:9090
-    # sem depender da rede da bridge (ver docker/grafana/provisioning/datasources/datasource.yml).
-    network_mode: host
-    environment:
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
-    volumes:
-      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
-    depends_on:
-      - prometheus
-
 volumes:
   rabbitmq_data:

@@ -5,6 +5,7 @@ scrape_configs:
   - job_name: camunda-async-events
     metrics_path: /actuator/prometheus
     static_configs:
-      # Container roda em network_mode: host (ver docker-compose.yml) - "localhost" aqui e o
-      # host de verdade, onde a aplicacao Spring Boot esta escutando (./mvnw spring-boot:run).
-      - targets: ["localhost:8080"]
+      # A aplicacao roda no host (./mvnw spring-boot:run), nao neste compose - host.docker.internal
+      # e o jeito do Prometheus (rodando no container) alcancar a porta 8080 do host (ver
+      # extra_hosts no docker-compose.monitoring.yml).
+      - targets: ["host.docker.internal:8080"]

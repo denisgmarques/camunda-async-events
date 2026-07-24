@@ -37,7 +37,7 @@ if ! command -v k6 >/dev/null 2>&1; then
 fi
 
 echo "== Subindo RabbitMQ + Prometheus + Grafana =="
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 
 echo "== Esperando o RabbitMQ ficar pronto =="
 until docker exec camunda-async-events-rabbitmq rabbitmq-diagnostics -q ping >/dev/null 2>&1; do

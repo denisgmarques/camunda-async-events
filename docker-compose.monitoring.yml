@@ -1,0 +1,39 @@
+
+# Prometheus + Grafana, separado do docker-compose.yml principal de propósito: são opcionais
+# (só servem pro teste de carga, ver "Monitoring and load testing" no README) e ficam num
+# arquivo à parte pra não obrigar quem só quer rodar o demo básico a subir mais dois
+# containers. Uso:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+#
+# (ou ./loadtest/run.sh, que já faz isso)
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: camunda-async-events-prometheus
+    ports:
+      - "9090:9090" # UI/API (http://localhost:9090)
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    # A aplicação roda no host (./mvnw spring-boot:run), não neste compose - host.docker.internal
+    # é o jeito padrão do Prometheus (rodando no container) alcançar a porta 8080 do host. No
+    # Docker Desktop (Mac/Windows) isso já vem de graça; no Linux precisa deste extra_hosts.
+    # Se o scrape ficar em timeout num host Linux específico, é provável que seja um firewall
+    # (ufw, etc.) bloqueando tráfego container->host encaminhado pela bridge - nesse caso a
+    # saída é liberar essa regra no firewall do host, não mudar a rede do container.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: camunda-async-events-grafana
+    ports:
+      - "3000:3000" # UI (http://localhost:3000)
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
