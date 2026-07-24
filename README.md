@@ -24,6 +24,7 @@ dead-lettering, idempotency — is production-grade and thoroughly tested.
 - [Design patterns used](#design-patterns-used)
 - [Tech stack](#tech-stack)
 - [BPMN testing strategy](#bpmn-testing-strategy)
+- [End-to-end integration test](#end-to-end-integration-test)
 - [Running it locally](#running-it-locally)
 - [Known limitations / next steps](#known-limitations--next-steps)
 
@@ -357,6 +358,7 @@ just durable queues and exchanges (see `RabbitMQTopologyConfig`):
 | camunda-bpm-junit5 | 7.23.0 |
 | camunda-bpm-assert | 15.0.0 |
 | camunda-process-test-coverage | 2.8.1 |
+| Testcontainers (RabbitMQ module) | managed by Spring Boot's dependency management |
 
 Main runtime dependencies: `spring-boot-starter-web`, `spring-boot-starter-data-jpa`,
 `spring-boot-starter-amqp`, `camunda-bpm-spring-boot-starter` (+ `-rest`, `-webapp`), `h2`,
@@ -398,6 +400,50 @@ What's covered:
 | `shouldGoThroughCorrectionLoopWhenCadastroIsNotOk` | Rejected registration loops back through the ZIP lookup with corrected data |
 | `shouldRetryFiveTimesThenGiveUpGracefullyWhenViaCepIsPersistentlyDown` | The BPMN retry loop attempts exactly 5 times, then degrades gracefully instead of failing the whole process |
 
+## End-to-end integration test
+
+`CamundaAsyncEventsEndToEndIT` is the test that actually proves the pipeline from the
+[walkthrough](#end-to-end-walkthrough-who-calls-whom-what-travels-where) above — no mocks, no
+standalone engine. It boots the **full** Spring Boot application (`@SpringBootTest`, real servlet
+container, real job executor) against a **real RabbitMQ**, started on demand by
+[Testcontainers](https://testcontainers.com/): nobody needs to remember `docker compose up` first,
+just have Docker available.
+
+It starts `cadastroClienteProcess` with a real ZIP code, lets the real ViaCEP API answer, and
+asserts against the live system — the child process instance created by the `CallActivity`, both
+`processed_transaction` rows, the outbox draining to empty — then republishes one message by hand
+to prove a redelivery is ignored. Each phase logs a `===` checkpoint, so running it narrates the
+whole chain, in order, on the console:
+
+```
+=== 1) iniciando cadastroClienteProcess (nome, cpf, cep) ===
+processInstanceId (pai) = 2e149a08-8788-11f1-a4b7-f27759d3d018
+=== 2) esperando o job assincrono da CallActivity + o ViaCEP real completarem e o processo chegar em 'Avaliar Cadastro' ===
+processInstanceId (filho, consultaCepProcess) = 2e253be4-8788-11f1-a4b7-f27759d3d018
+=== 3) esperando outbox -> RabbitMQ (publisher-confirm) -> consumer confirmarem AS DUAS processInstanceId (mesma transacao, dois processos) ===
+confirmado: processed_transaction tem registro para o pai E para o filho
+confirmado: nenhuma linha PENDING sobrou no outbox (tudo foi confirmado pelo broker)
+=== 4) reenviando manualmente a MESMA mensagem do filho para provar a idempotencia ===
+Mensagem (transacao=..., processInstance=...) ja processada, ignorando reentrega
+confirmado: a reentrega foi ignorada, processed_transaction nao cresceu (continua em 3 registro(s))
+=== fim: outbox -> RabbitMQ -> consumer -> idempotencia validados de ponta a ponta ===
+```
+
+It's an `*IT` class, not `*Test`, so it runs on `mvn verify` (via `maven-failsafe-plugin`), not the
+default `mvn test`. It's slower than the BPMN suite (~15s: boots the whole Spring context, starts a
+container, makes a real HTTP call) and needs Docker, so it stays out of the fast inner loop:
+
+```bash
+./mvnw verify
+```
+
+**Why is the real ViaCEP call left unmocked here, when every other test fakes it?** On purpose:
+this test's one job is to prove the messaging pipeline against real infrastructure, and stubbing
+out the one real dependency the demo actually has would undercut that. The trade-off is a network
+dependency in the suite — acceptable here, since a `CallActivity` stuck in the
+[retry loop](#the-bpmn-processes) if ViaCEP is briefly unreachable just makes the test fail fast
+(bounded `await()` timeouts), not hang.
+
 ## Running it locally
 
 ```bash
@@ -417,10 +463,17 @@ Then watch it flow: RabbitMQ management UI (`camunda.events.queue`, `camunda.eve
 `camunda.events.dlq.queue`) and the application logs (`CamundaEventsRabbitConsumer` logs every message it
 processes or skips as a duplicate).
 
-Run the BPMN test suite:
+Run the fast BPMN test suite:
 
 ```bash
 ./mvnw test
+```
+
+Or run everything, including the [end-to-end integration test](#end-to-end-integration-test)
+(needs Docker, ~15s more):
+
+```bash
+./mvnw verify
 ```
 
 ## Known limitations / next steps

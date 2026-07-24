@@ -24,6 +24,7 @@ dead-lettering, idempotência — é de qualidade produtiva e bem testada.
 - [Design patterns utilizados](#design-patterns-utilizados)
 - [Stack técnica](#stack-técnica)
 - [Estratégia de testes de BPMN](#estratégia-de-testes-de-bpmn)
+- [Teste de integração de ponta a ponta](#teste-de-integração-de-ponta-a-ponta)
 - [Rodando localmente](#rodando-localmente)
 - [Limitações conhecidas / próximos passos](#limitações-conhecidas--próximos-passos)
 
@@ -364,6 +365,7 @@ nenhum plugin do RabbitMQ, só filas e exchanges duráveis (veja `RabbitMQTopolo
 | camunda-bpm-junit5 | 7.23.0 |
 | camunda-bpm-assert | 15.0.0 |
 | camunda-process-test-coverage | 2.8.1 |
+| Testcontainers (módulo RabbitMQ) | gerenciado pelo dependency management do Spring Boot |
 
 Principais dependências de runtime: `spring-boot-starter-web`, `spring-boot-starter-data-jpa`,
 `spring-boot-starter-amqp`, `camunda-bpm-spring-boot-starter` (+ `-rest`, `-webapp`), `h2`,
@@ -407,6 +409,51 @@ O que está coberto:
 | `shouldGoThroughCorrectionLoopWhenCadastroIsNotOk` | Um cadastro reprovado volta a passar pela busca de CEP com os dados corrigidos |
 | `shouldRetryFiveTimesThenGiveUpGracefullyWhenViaCepIsPersistentlyDown` | O loop de retentativa do BPMN tenta exatamente 5 vezes, depois degrada com elegância em vez de derrubar o processo inteiro |
 
+## Teste de integração de ponta a ponta
+
+O `CamundaAsyncEventsEndToEndIT` é o teste que prova de verdade o pipeline do
+[passo a passo](#passo-a-passo-ponta-a-ponta-quem-chama-quem-o-que-passa-por-onde) acima — sem
+mocks, sem engine standalone. Ele sobe a aplicação Spring Boot **inteira** (`@SpringBootTest`,
+container servlet real, job executor real) contra um **RabbitMQ real**, iniciado sob demanda pelo
+[Testcontainers](https://testcontainers.com/): ninguém precisa lembrar de rodar
+`docker compose up` antes, só ter o Docker disponível.
+
+Ele inicia o `cadastroClienteProcess` com um CEP real, deixa a API real do ViaCEP responder, e
+verifica contra o sistema vivo — a instância filha criada pela `CallActivity`, os dois registros em
+`processed_transaction`, o outbox esvaziando — e por fim reenvia uma mensagem manualmente pra
+provar que uma reentrega é ignorada. Cada fase loga um checkpoint `===`, então rodar esse teste
+narra a cadeia inteira, em ordem, no console:
+
+```
+=== 1) iniciando cadastroClienteProcess (nome, cpf, cep) ===
+processInstanceId (pai) = 2e149a08-8788-11f1-a4b7-f27759d3d018
+=== 2) esperando o job assincrono da CallActivity + o ViaCEP real completarem e o processo chegar em 'Avaliar Cadastro' ===
+processInstanceId (filho, consultaCepProcess) = 2e253be4-8788-11f1-a4b7-f27759d3d018
+=== 3) esperando outbox -> RabbitMQ (publisher-confirm) -> consumer confirmarem AS DUAS processInstanceId (mesma transacao, dois processos) ===
+confirmado: processed_transaction tem registro para o pai E para o filho
+confirmado: nenhuma linha PENDING sobrou no outbox (tudo foi confirmado pelo broker)
+=== 4) reenviando manualmente a MESMA mensagem do filho para provar a idempotencia ===
+Mensagem (transacao=..., processInstance=...) ja processada, ignorando reentrega
+confirmado: a reentrega foi ignorada, processed_transaction nao cresceu (continua em 3 registro(s))
+=== fim: outbox -> RabbitMQ -> consumer -> idempotencia validados de ponta a ponta ===
+```
+
+É uma classe `*IT`, não `*Test`, então roda com `mvn verify` (via `maven-failsafe-plugin`), não no
+`mvn test` padrão. É mais lento que a suíte de BPMN (~15s: sobe o Spring context inteiro, inicia um
+container, faz uma chamada HTTP real) e precisa de Docker, então fica fora do ciclo rápido do dia a
+dia:
+
+```bash
+./mvnw verify
+```
+
+**Por que a chamada real ao ViaCEP fica sem mock aqui, se todo o resto do repo simula isso?** De
+propósito: a única função deste teste é provar o pipeline de mensageria contra infraestrutura real,
+e simular a única dependência real que a demonstração de fato tem enfraqueceria isso. O trade-off é
+uma dependência de rede na suíte — aceitável aqui, já que uma `CallActivity` presa no
+[loop de retentativa](#os-processos-bpmn) se o ViaCEP estiver momentaneamente indisponível só faz o
+teste falhar rápido (timeouts limitados no `await()`), não travar.
+
 ## Rodando localmente
 
 ```bash
@@ -426,10 +473,17 @@ Depois é só acompanhar o fluxo: management UI do RabbitMQ (`camunda.events.que
 `camunda.events.retry.queue`, `camunda.events.dlq.queue`) e os logs da aplicação
 (`CamundaEventsRabbitConsumer` loga toda mensagem que processa ou ignora por já ter sido processada).
 
-Rodar a suíte de testes de BPMN:
+Rodar a suíte rápida de testes de BPMN:
 
 ```bash
 ./mvnw test
+```
+
+Ou rodar tudo, incluindo o [teste de integração de ponta a ponta](#teste-de-integração-de-ponta-a-ponta)
+(precisa de Docker, ~15s a mais):
+
+```bash
+./mvnw verify
 ```
 
 ## Limitações conhecidas / próximos passos
