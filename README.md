@@ -1,4 +1,4 @@
-# Camunda Async Events
+# 📬 Camunda Async Events
 
 > 🇧🇷 Prefer Portuguese? [Read this in pt-BR](README.pt-br.md)
 
