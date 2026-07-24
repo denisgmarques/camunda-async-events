@@ -90,7 +90,7 @@ mockada num teste unitário:
 - ✅ Uma mensagem que continua falhando no consumidor é retentada exatamente 5 vezes, 10 segundos
   entre cada uma, e só então roteada pra DLQ — verificado lendo o contador do cabeçalho `x-death`
   devolvido pelo RabbitMQ, não só confiando no código.
-- ✅ O loop de retentativa em nível de BPMN ("teimosinha", veja abaixo) desiste depois de
+- ✅ O loop de retentativa em nível de negócio (veja abaixo) desiste depois de
   **exatamente** 5 tentativas — nem 4, nem 6 — provado por um teste que garante que o processo
   ainda está esperando depois de 4 tentativas e já seguiu em frente depois da 5ª.
 
@@ -279,7 +279,7 @@ CEP uma sub-instância reutilizável e testável independentemente, e é o que f
 [múltiplas processInstanceId numa mesma transação](#passo-a-passo-ponta-a-ponta-quem-chama-quem-o-que-passa-por-onde)
 acontecer, que é exatamente o que este repositório está validando.
 
-### `consultaCepProcess` — a "teimosinha" (retentativa persistente)
+### `consultaCepProcess` — o loop de retentativa em nível de negócio
 
 ![diagrama do consultaCepProcess](docs/images/bpmn-consulta-cep.png)
 
@@ -346,7 +346,7 @@ nenhum plugin do RabbitMQ, só filas e exchanges duráveis (veja `RabbitMQTopolo
 | **Polling Publisher** (+ disparo de baixa latência) | `OutboxRelay` — varredura agendada a cada 5s, mais um disparo assíncrono logo após o commit |
 | **Idempotent Consumer** | `CamundaEventListener` + `processed_transaction`, chaveado por `(transactionId, processInstanceId)` |
 | **Retry com backoff + Dead Letter Queue** | Topologia de ricochete TTL/DLX do RabbitMQ, contagem de tentativas baseada em `x-death` |
-| **Loop de retentativa via Boundary Error Event do BPMN** ("teimosinha") | `consultaCepProcess` — uma retentativa visível ao negócio, com cadência própria, deliberadamente desacoplada do retry técnico de job do Camunda |
+| **Loop de retentativa via Boundary Error Event do BPMN** (retentativa em nível de negócio) | `consultaCepProcess` — uma retentativa visível ao negócio, com cadência própria, deliberadamente desacoplada do retry técnico de job do Camunda |
 | **Composição de processos via CallActivity** | `cadastroClienteProcess` chamando `consultaCepProcess`, com mapeamento explícito de variáveis `camunda:in`/`camunda:out` |
 | **DTOs anticorrupção** | `ProcessInstanceEventMessage` / `TaskEventMessage` — mapeados manualmente a partir das classes internas `HistoryEvent` do Camunda, nunca as estendendo, para que o contrato de integração não quebre num upgrade do Camunda |
 | **Conexão via plugin (sem service locator)** | `CamundaHistoryEventHandlerPlugin implements CamundaProcessEngineConfiguration` — um `@Component` injetado normalmente pelo Spring, registrado através da própria SPI `ProcessEnginePlugin` do Camunda |
@@ -387,7 +387,7 @@ mantém rápidos (a suíte inteira roda em ~1,5s) e determinísticos:
   chamada HTTP, então os testes nunca batem na API real do ViaCEP e conseguem forçar o caminho de
   falha de forma determinística.
 - Como os jobs (continuações assíncronas *e* timers) são executados manualmente via
-  `managementService().executeJob(id)`, o teste que prova que a "teimosinha" desiste depois de
+  `managementService().executeJob(id)`, o teste que prova que o loop de retentativa em nível de negócio desiste depois de
   **exatamente** 5 tentativas — nem 4, nem 6 — roda instantaneamente, sem esperar cinco timers reais
   de 15 segundos. É assim também que o job assíncrono da `CallActivity` é avançado nos outros
   testes.

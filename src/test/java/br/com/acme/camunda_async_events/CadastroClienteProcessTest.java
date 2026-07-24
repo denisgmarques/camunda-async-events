@@ -101,13 +101,13 @@ class CadastroClienteProcessTest {
 			executeAnyPendingJob();
 		}
 		assertNotNull(managementService().createJobQuery().singleResult(),
-				"Apos 4 tentativas a 'teimosinha' ainda deveria estar esperando o timer pra 5a tentativa");
+				"Apos 4 tentativas o loop de retentativa ainda deveria estar esperando o timer pra 5a tentativa");
 
 		// 5a e ultima tentativa permitida: falha e desiste graciosamente
 		executeAnyPendingJob();
 
 		Task avaliarCadastro = getTask(processInstance, "Task_AvaliarCadastro");
-		assertNotNull(avaliarCadastro, "Esperava que a 'teimosinha' desistisse apos 5 tentativas e voltasse para Avaliar Cadastro");
+		assertNotNull(avaliarCadastro, "Esperava que o loop de retentativa desistisse apos 5 tentativas e voltasse para Avaliar Cadastro");
 		assertEquals(Boolean.FALSE, runtimeService().getVariable(processInstance.getId(), "endereco_encontrado"));
 
 		completeTask(avaliarCadastro, Map.of("cadastro_ok", false));

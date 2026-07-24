@@ -50,7 +50,7 @@ public class ViaCepDelegate implements JavaDelegate {
 		}
 		catch (RestClientException e) {
 			// Falha técnica (timeout, conexão recusada, 5xx) - sinaliza como erro de negócio
-			// do BPMN para a "teimosinha" do processo consultaCepProcess decidir se retenta.
+			// do BPMN para o loop de retentativa do processo consultaCepProcess decidir se retenta.
 			throw new BpmnError(ERROR_CODE_VIACEP_INDISPONIVEL, "Falha ao consultar o ViaCEP: " + e.getMessage());
 		}
 	}

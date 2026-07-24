@@ -86,7 +86,7 @@ mocked in a unit test:
 - ✅ A message that keeps failing in the consumer is retried exactly 5 times, 10 seconds apart,
   and only then routed to the DLQ — verified by reading the `x-death` header count returned by
   RabbitMQ, not just by trusting the code.
-- ✅ The BPMN-level retry loop ("teimosinha", see below) gives up after **exactly** 5 attempts —
+- ✅ The business-level retry loop (see below) gives up after **exactly** 5 attempts —
   not 4, not 6 — proven by a test that asserts the process is still waiting after 4 attempts and
   has moved on after the 5th.
 
@@ -274,7 +274,7 @@ lookup a reusable, independently testable sub-process, and it's what makes the
 [multi-process-instance-per-transaction](#end-to-end-walkthrough-who-calls-whom-what-travels-where)
 scenario happen in the first place, which is exactly what this repo is validating.
 
-### `consultaCepProcess` — the "teimosinha" (stubborn retry)
+### `consultaCepProcess` — the business-level retry loop
 
 ![consultaCepProcess diagram](docs/images/bpmn-consulta-cep.png)
 
@@ -339,7 +339,7 @@ just durable queues and exchanges (see `RabbitMQTopologyConfig`):
 | **Polling Publisher** (+ low-latency trigger) | `OutboxRelay` — scheduled sweep every 5s, plus an async kick right after commit |
 | **Idempotent Consumer** | `CamundaEventListener` + `processed_transaction`, keyed by `(transactionId, processInstanceId)` |
 | **Retry with backoff + Dead Letter Queue** | RabbitMQ TTL/DLX bounce topology, `x-death`-based attempt counting |
-| **BPMN Boundary Error Event retry loop** ("teimosinha") | `consultaCepProcess` — a business-visible, independently-timed retry, deliberately decoupled from Camunda's technical job retry |
+| **BPMN Boundary Error Event retry loop** (business-level retry) | `consultaCepProcess` — a business-visible, independently-timed retry, deliberately decoupled from Camunda's technical job retry |
 | **Process composition via CallActivity** | `cadastroClienteProcess` calling `consultaCepProcess`, with explicit `camunda:in`/`camunda:out` variable mapping |
 | **Anti-corruption DTOs** | `ProcessInstanceEventMessage` / `TaskEventMessage` — hand-mapped from Camunda's internal `HistoryEvent` classes, never extending them, so the wire contract doesn't break on a Camunda upgrade |
 | **Plugin-based wiring (no service locator)** | `CamundaHistoryEventHandlerPlugin implements CamundaProcessEngineConfiguration` — a normal Spring-injected `@Component`, registered through Camunda's own `ProcessEnginePlugin` SPI |
@@ -379,7 +379,7 @@ suite runs in ~1.5s) and deterministic:
   delegate, so tests never hit the real ViaCEP API and can deterministically force the failure
   path.
 - Because jobs (async continuations *and* timers) are executed manually via
-  `managementService().executeJob(id)`, the test that proves the "teimosinha" gives up after
+  `managementService().executeJob(id)`, the test that proves the business-level retry loop gives up after
   **exactly** 5 attempts — not 4, not 6 — runs instantly, without waiting for five real 15-second
   timers. That's also how the async `CallActivity` job is advanced in the other tests.
 

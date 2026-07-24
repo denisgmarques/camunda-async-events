@@ -6,7 +6,7 @@ import org.camunda.bpm.engine.delegate.JavaDelegate;
 
 /**
  * Simula o ViaCEP tecnicamente indisponível em toda chamada (timeout/conexão recusada),
- * para testar a "teimosinha" de retentativa do {@code consultaCepProcess}.
+ * para testar o loop de retentativa em nível de negócio do {@code consultaCepProcess}.
  */
 public class AlwaysFailingViaCepDelegate implements JavaDelegate {
 
