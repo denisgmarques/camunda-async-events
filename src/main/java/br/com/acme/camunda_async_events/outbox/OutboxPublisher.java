@@ -59,6 +59,10 @@ class OutboxPublisher {
 	@Transactional(propagation = Propagation.REQUIRES_NEW)
 	public void publish(OutboxMessage message) {
 		if (publishWithConfirm(message)) {
+			/**
+			 * APOS ENVIAR COM SUCESSO AO RABBITMQ
+			 * APAGA DO DB (OUTBOX)
+			 */
 			repository.deleteById(message.getId());
 		}
 		else {

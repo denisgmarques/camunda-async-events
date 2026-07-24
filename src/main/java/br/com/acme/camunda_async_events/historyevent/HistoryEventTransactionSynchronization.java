@@ -50,6 +50,9 @@ class HistoryEventTransactionSynchronization implements TransactionSynchronizati
 			return;
 		}
 
+		/**
+		 * SALVA NO DB OS EVENTOS COMMIT NA MESMA TRANSAÇÃO
+		 */
 		HistoryEventAggregator.aggregate(events, transactionId).forEach(this::saveToOutbox);
 		// Já extraímos tudo que interessa (agregado e persistido); solta as referências aos
 		// HistoryEvent brutos em vez de esperar o objeto inteiro morrer no afterCompletion.
@@ -60,6 +63,10 @@ class HistoryEventTransactionSynchronization implements TransactionSynchronizati
 	public void afterCompletion(int status) {
 		TransactionSynchronizationManager.unbindResourceIfPossible(RESOURCE_KEY);
 		if (status == TransactionSynchronization.STATUS_COMMITTED) {
+			/**
+			 * ENVIA PARA O RABBITMQ OS EVENTOS EM OUTRA THREAD
+			 * E DELETA DO DB (OUTBOX)
+			 */
 			outboxRelay.triggerAsync(savedOutboxMessages);
 		}
 	}
