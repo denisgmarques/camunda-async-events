@@ -507,11 +507,12 @@ sugerir mais do que de fato entrega.
   outbox (tanto `outbox_message` quanto o `processed_transaction` do consumidor) é o backend certo
   pra esse padrão — esse é o ponto inteiro do Transactional Outbox — mas o *código do relay atual*
   assume um único escritor:
-  - O caminho de baixa latência (`OutboxRelay.triggerAsync(List<Long>)`) publica **só os ids que a
-    própria transação recém-commitada produziu** — recebe a lista exata da
-    `TransactionSynchronization` em memória que os escreveu, não faz uma query. Suba duas
-    instâncias e nenhuma mexe numa linha que a outra escreveu por esse caminho — sem corrida entre
-    instâncias no caso comum (broker saudável, nada caiu).
+  - O caminho de baixa latência (`OutboxRelay.triggerAsync(List<OutboxMessage>)`) publica **só as
+    entidades que a própria transação recém-commitada produziu** — recebe os objetos exatos da
+    `TransactionSynchronization` em memória que os escreveu, sem nenhum `SELECT` (marcar `SENT`
+    depois é um `UPDATE ... WHERE id = ?` direto, não um ler-e-gravar). Suba duas instâncias e
+    nenhuma mexe numa linha que a outra escreveu por esse caminho — sem corrida entre instâncias
+    no caso comum (broker saudável, nada caiu).
   - `OutboxRelay.relayPendingMessages()`, a varredura agendada, ainda precisa consultar de forma
     ampla (`findByStatusOrderById(PENDING)`, sem filtro de origem) — é o único jeito de uma
     instância sobrevivente resgatar uma linha que outra instância, ao cair no meio do caminho,

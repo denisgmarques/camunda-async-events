@@ -15,10 +15,11 @@ import java.util.List;
  *
  * <ul>
  *   <li>{@link #triggerAsync(List)} — disparo de baixa latência logo após o commit, publica
- *   <b>só os ids que a própria transação acabou de escrever</b>, sem consultar o banco por
- *   tudo que está PENDING. Isso é o que garante que uma JVM nunca mexe em linhas escritas por
- *   outra transação/instância no caminho comum (broker saudável): cada instância só publica o
- *   que ela mesma produziu, ninguém disputa a mesma linha.</li>
+ *   <b>as entidades que a própria transação acabou de gravar</b> (recebidas em memória, sem
+ *   SELECT nenhum) em vez de consultar o banco por tudo que está PENDING. Isso é o que garante
+ *   que uma JVM nunca mexe em linhas escritas por outra transação/instância no caminho comum
+ *   (broker saudável): cada instância só publica o que ela mesma produziu, ninguém disputa a
+ *   mesma linha, e nem precisa reler o que acabou de escrever.</li>
  *   <li>{@link #relayPendingMessages()} — rede de segurança agendada, varre TODAS as linhas
  *   PENDING (de qualquer origem). Precisa ser ampla assim de propósito: é o único jeito de uma
  *   instância sobrevivente resgatar uma linha que outra JVM escreveu e não chegou a publicar
@@ -48,18 +49,18 @@ public class OutboxRelay {
 	}
 
 	/**
-	 * Disparo de baixa latência logo após o commit da transação do Camunda. Recebe os ids
-	 * exatos das linhas que a própria transação acabou de gravar (mantidos em memória, do
-	 * {@code beforeCommit} até aqui, pela sincronização que os produziu) em vez de perguntar
+	 * Disparo de baixa latência logo após o commit da transação do Camunda. Recebe as entidades
+	 * exatas que a própria transação acabou de gravar (mantidas em memória, do
+	 * {@code beforeCommit} até aqui, pela sincronização que as produziu) em vez de perguntar
 	 * ao banco "o que está pendente" — essa é a diferença entre publicar exatamente o que é
-	 * seu e disputar linha por linha com outras instâncias.
+	 * seu, sem reler nada, e disputar linha por linha com outras instâncias.
 	 */
 	@Async
-	public synchronized void triggerAsync(List<Long> outboxMessageIds) {
-		if (outboxMessageIds.isEmpty()) {
+	public synchronized void triggerAsync(List<OutboxMessage> outboxMessages) {
+		if (outboxMessages.isEmpty()) {
 			return;
 		}
 
-		outboxMessageIds.forEach(publisher::publish);
+		outboxMessages.forEach(publisher::publish);
 	}
 }

@@ -27,7 +27,7 @@ class HistoryEventTransactionSynchronization implements TransactionSynchronizati
 
 	private final String transactionId = UUID.randomUUID().toString();
 	private final List<HistoryEvent> events = new ArrayList<>();
-	private final List<Long> savedOutboxMessageIds = new ArrayList<>();
+	private final List<OutboxMessage> savedOutboxMessages = new ArrayList<>();
 
 	private final OutboxMessageRepository outboxMessageRepository;
 	private final OutboxRelay outboxRelay;
@@ -57,7 +57,7 @@ class HistoryEventTransactionSynchronization implements TransactionSynchronizati
 	public void afterCompletion(int status) {
 		TransactionSynchronizationManager.unbindResourceIfPossible(RESOURCE_KEY);
 		if (status == TransactionSynchronization.STATUS_COMMITTED) {
-			outboxRelay.triggerAsync(savedOutboxMessageIds);
+			outboxRelay.triggerAsync(savedOutboxMessages);
 		}
 	}
 
@@ -66,7 +66,7 @@ class HistoryEventTransactionSynchronization implements TransactionSynchronizati
 			String payload = objectMapper.writeValueAsString(message);
 			OutboxMessage saved = outboxMessageRepository.save(new OutboxMessage(message.getTransactionId(),
 					message.getProcessInstanceId(), message.getProcessDefinitionKey(), payload));
-			savedOutboxMessageIds.add(saved.getId());
+			savedOutboxMessages.add(saved);
 		}
 		catch (JsonProcessingException e) {
 			throw new IllegalStateException("Falha serializando evento de historico do Camunda", e);

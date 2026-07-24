@@ -11,11 +11,11 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Publica uma única mensagem outbox no RabbitMQ e marca como enviada, cada uma na sua
- * própria transação ({@code REQUIRES_NEW}) para que a falha ao publicar uma mensagem não
- * desfaça o progresso já feito com as demais. Só marca {@link OutboxStatus#SENT} depois de
- * receber a confirmação (publisher confirm) do broker — sem isso a linha continua PENDING e
- * será tentada de novo no próximo ciclo do {@link OutboxRelay}.
+ * Publica mensagens outbox no RabbitMQ, cada uma na sua própria transação
+ * ({@code REQUIRES_NEW}) para que a falha ao publicar uma não desfaça o progresso já feito com
+ * as demais. Só marca {@link OutboxStatus#SENT} depois de receber a confirmação (publisher
+ * confirm) do broker — sem isso a linha continua PENDING e será tentada de novo no próximo
+ * ciclo do {@link OutboxRelay}.
  */
 @Component
 @Slf4j
@@ -26,6 +26,12 @@ class OutboxPublisher {
 	private final RabbitTemplate rabbitTemplate;
 	private final CamundaEventsRabbitProperties properties;
 
+	/**
+	 * Caminho da varredura agendada: recebe só o id, relê do banco antes de publicar. A
+	 * releitura importa aqui porque esse é o caminho que pode disputar a mesma linha com outra
+	 * JVM — o SELECT é o que permite pular uma linha que outra instância já confirmou entre a
+	 * consulta ampla do {@link OutboxRelay#relayPendingMessages()} e esta chamada.
+	 */
 	@Transactional(propagation = Propagation.REQUIRES_NEW)
 	public void publish(Long outboxMessageId) {
 		OutboxMessage message = repository.findById(outboxMessageId).orElse(null);
@@ -39,6 +45,23 @@ class OutboxPublisher {
 		}
 		else {
 			log.warn("RabbitMQ nao confirmou a mensagem outbox {} a tempo; sera retentada", outboxMessageId);
+		}
+	}
+
+	/**
+	 * Caminho de baixa latência pós-commit: recebe a entidade que a própria transação acabou
+	 * de gravar (ainda com o payload em memória, sem SELECT). Seguro sem reconferir o status
+	 * porque {@link OutboxRelay#triggerAsync(List)} e {@link OutboxRelay#relayPendingMessages()}
+	 * são {@code synchronized} no mesmo monitor — dentro desta JVM não existe outra chamada
+	 * concorrente que possa ter publicado esta linha antes.
+	 */
+	@Transactional(propagation = Propagation.REQUIRES_NEW)
+	public void publish(OutboxMessage message) {
+		if (publishWithConfirm(message)) {
+			repository.updateStatus(message.getId(), OutboxStatus.SENT);
+		}
+		else {
+			log.warn("RabbitMQ nao confirmou a mensagem outbox {} a tempo; sera retentada", message.getId());
 		}
 	}
 

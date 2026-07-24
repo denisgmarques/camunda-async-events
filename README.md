@@ -495,11 +495,12 @@ more than it does.
   `outbox_message` and the consumer's `processed_transaction`) is the right backend for this
   pattern — that's the whole point of Transactional Outbox — but the *current relay code* assumes
   a single writer:
-  - The low-latency path (`OutboxRelay.triggerAsync(List<Long>)`) publishes **only the ids the
-    transaction that just committed produced** — it's handed the exact list from the in-memory
-    `TransactionSynchronization` that wrote them, not a query. Run two instances and neither
-    touches a row the other one wrote on this path — no cross-instance race on the common case
-    (broker healthy, nothing crashed).
+  - The low-latency path (`OutboxRelay.triggerAsync(List<OutboxMessage>)`) publishes **only the
+    entities the transaction that just committed produced** — it's handed the exact objects from
+    the in-memory `TransactionSynchronization` that wrote them, with no `SELECT` at all (marking
+    `SENT` afterward is a targeted `UPDATE ... WHERE id = ?`, not a read-then-write). Run two
+    instances and neither touches a row the other one wrote on this path — no cross-instance race
+    on the common case (broker healthy, nothing crashed).
   - `OutboxRelay.relayPendingMessages()`, the scheduled sweep, still has to query broadly
     (`findByStatusOrderById(PENDING)`, no origin filter) — that's the only way a surviving
     instance can rescue a row an instance that crashed mid-flight never got to publish. Run two
