@@ -9,7 +9,14 @@ consumer.
 
 It is deliberately built as a demo: the BPMN processes are simple (a customer registration that
 looks up an address by ZIP code), but the plumbing around them — transaction handling, retry,
-dead-lettering, idempotency — is production-grade and thoroughly tested.
+dead-lettering, idempotency — is built and tested to a production-grade *standard of correctness*.
+
+**This is an architecture reference, not a production-ready artifact.** The patterns, the
+transaction boundaries, and the failure-mode reasoning are meant to be copied into a real system.
+The code as it stands is not: it runs as a single application instance, against an in-memory H2
+database, with no schema migrations, no auth on the Camunda webapps, and no retention policy on
+its own tables. See [Known limitations / trade-offs](#known-limitations--trade-offs) for exactly
+where the line between "the pattern is right" and "this specific code is deployable" sits.
 
 ---
 
@@ -26,7 +33,7 @@ dead-lettering, idempotency — is production-grade and thoroughly tested.
 - [BPMN testing strategy](#bpmn-testing-strategy)
 - [End-to-end integration test](#end-to-end-integration-test)
 - [Running it locally](#running-it-locally)
-- [Known limitations / next steps](#known-limitations--next-steps)
+- [Known limitations / trade-offs](#known-limitations--trade-offs)
 
 ---
 
@@ -476,15 +483,39 @@ Or run everything, including the [end-to-end integration test](#end-to-end-integ
 ./mvnw verify
 ```
 
-## Known limitations / next steps
+## Known limitations / trade-offs
 
+This is a reference for the **pattern**, not a checklist-complete production deployment. The
+things below aren't oversights — they're scope cuts made deliberately to keep the demo focused —
+but they are real gaps, and worth naming explicitly rather than letting "thoroughly tested" imply
+more than it does.
+
+- **Scales to exactly one application instance, on purpose.** The relational outbox table (both
+  `outbox_message` and the consumer's `processed_transaction`) is the right backend for this
+  pattern — that's the whole point of Transactional Outbox — but the *current relay code* assumes
+  a single writer:
+  - `OutboxRelay.relayPendingMessages()` is `synchronized`, which only serializes the scheduled
+    sweep against the post-commit async trigger **within one JVM**. Run two instances of this app
+    and both will poll `PENDING` rows and race to publish the same ones — not incorrect
+    end-to-end (the consumer is idempotent) but wasteful, and it doesn't get you more throughput
+    by scaling out.
+  - `findByStatusOrderById(PENDING)` has no `LIMIT`/pagination — every relay cycle loads *all*
+    pending rows into memory. Fine at demo volume; a real backlog (e.g. after a broker outage)
+    needs batching.
+  - Getting to real multi-instance horizontal scaling means row-level claiming (e.g.
+    `SELECT ... FOR UPDATE SKIP LOCKED`) instead of the current `synchronized` method, plus a
+    bounded, indexed query.
+- **No schema migrations, no index tuning.** `spring.jpa.hibernate.ddl-auto=update` against H2
+  in-memory is convenient for a demo that resets on every run; a real deployment needs
+  Flyway/Liquibase and an explicit index on `outbox_message.status` (today's query would degrade
+  as the table grows, since nothing archives `SENT` rows).
+- **No retention/archiving policy.** Both `outbox_message` and `processed_transaction` grow
+  forever — nothing prunes old `SENT` rows or old idempotency records. The idempotency lookup
+  itself stays fast (it's a primary-key hit), but unbounded storage growth is a real production
+  concern that isn't addressed here.
 - **Cockpit/Tasklist authentication isn't configured yet** — `camunda.bpm.admin-user` is absent
   from `application.properties`, so the webapps are deployed but there's no user to log in with.
   The REST API and RabbitMQ management UI are fully usable in the meantime.
-- **`OutboxRelay.relayPendingMessages()` is `synchronized`**, which is correct and sufficient for
-  a single application instance (this demo's scope) but would need row-level claiming (e.g.
-  `SELECT ... FOR UPDATE SKIP LOCKED`) or a distributed lock to scale to multiple instances
-  without publishing the same row twice.
 - **`ViaCepDelegate` calls the real ViaCEP API** in production code — by design, so the demo is
   genuinely end-to-end; tests substitute it with fakes, as described above.
 

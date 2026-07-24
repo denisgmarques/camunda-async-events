@@ -9,7 +9,16 @@ um consumidor idempotente.
 
 É construído deliberadamente como uma demonstração: os processos BPMN são simples (um cadastro de
 cliente que busca o endereço a partir do CEP), mas a engrenagem ao redor deles — transação, retry,
-dead-lettering, idempotência — é de qualidade produtiva e bem testada.
+dead-lettering, idempotência — foi construída e testada com um *padrão de correção* de nível
+produtivo.
+
+**Isso é um modelo de referência de arquitetura, não um artefato pronto pra produção.** Os
+padrões, os limites de transação e o raciocínio sobre modos de falha é o que vale a pena levar
+para um sistema real. O código como está, não: ele roda como uma única instância da aplicação,
+contra um banco H2 em memória, sem migração de schema, sem autenticação nas webapps do Camunda e
+sem política de retenção nas próprias tabelas. Veja
+[Limitações conhecidas / trade-offs](#limitações-conhecidas--trade-offs) pra saber exatamente onde
+fica a linha entre "o padrão está certo" e "esse código específico está pronto pra deploy".
 
 ---
 
@@ -26,7 +35,7 @@ dead-lettering, idempotência — é de qualidade produtiva e bem testada.
 - [Estratégia de testes de BPMN](#estratégia-de-testes-de-bpmn)
 - [Teste de integração de ponta a ponta](#teste-de-integração-de-ponta-a-ponta)
 - [Rodando localmente](#rodando-localmente)
-- [Limitações conhecidas / próximos passos](#limitações-conhecidas--próximos-passos)
+- [Limitações conhecidas / trade-offs](#limitações-conhecidas--trade-offs)
 
 ---
 
@@ -486,16 +495,40 @@ Ou rodar tudo, incluindo o [teste de integração de ponta a ponta](#teste-de-in
 ./mvnw verify
 ```
 
-## Limitações conhecidas / próximos passos
+## Limitações conhecidas / trade-offs
 
+Isso é uma referência do **padrão**, não uma implantação de produção com checklist completo. Os
+pontos abaixo não são descuidos — são cortes de escopo deliberados pra manter a demonstração
+focada — mas são lacunas reais, e vale nomeá-las explicitamente em vez de deixar "bem testada"
+sugerir mais do que de fato entrega.
+
+- **Escala para exatamente uma instância da aplicação, de propósito.** A tabela relacional do
+  outbox (tanto `outbox_message` quanto o `processed_transaction` do consumidor) é o backend certo
+  pra esse padrão — esse é o ponto inteiro do Transactional Outbox — mas o *código do relay atual*
+  assume um único escritor:
+  - `OutboxRelay.relayPendingMessages()` é `synchronized`, o que só serializa a varredura agendada
+    contra o disparo assíncrono pós-commit **dentro de uma mesma JVM**. Suba duas instâncias desta
+    aplicação e as duas vão fazer polling nas linhas `PENDING` e disputar a publicação das mesmas
+    linhas — não incorreto de ponta a ponta (o consumidor é idempotente), mas desperdiçado, e não
+    ganha throughput escalando horizontalmente.
+  - `findByStatusOrderById(PENDING)` não tem `LIMIT`/paginação — cada ciclo do relay carrega
+    *todas* as linhas pendentes pra memória. Tranquilo no volume da demo; um backlog real
+    (ex.: depois de uma queda do broker) precisa de lotes.
+  - Chegar a um escalonamento horizontal multi-instância de verdade exige captura em nível de
+    linha (ex.: `SELECT ... FOR UPDATE SKIP LOCKED`) no lugar do método `synchronized` atual, mais
+    uma query limitada e indexada.
+- **Sem migração de schema, sem ajuste de índice.** `spring.jpa.hibernate.ddl-auto=update` contra
+  H2 em memória é conveniente pra uma demo que reseta a cada execução; um deploy real precisa de
+  Flyway/Liquibase e um índice explícito em `outbox_message.status` (a query de hoje degradaria
+  conforme a tabela cresce, já que nada arquiva as linhas `SENT`).
+- **Sem política de retenção/arquivamento.** Tanto `outbox_message` quanto `processed_transaction`
+  crescem pra sempre — nada remove linhas `SENT` antigas ou registros de idempotência antigos. A
+  busca de idempotência em si continua rápida (é um hit na chave primária), mas crescimento
+  ilimitado de armazenamento é uma preocupação real de produção que não é endereçada aqui.
 - **A autenticação do Cockpit/Tasklist ainda não está configurada** — `camunda.bpm.admin-user`
   está ausente do `application.properties`, então as webapps são implantadas mas não existe um
   usuário para fazer login. A API REST e a management UI do RabbitMQ estão totalmente utilizáveis
   enquanto isso.
-- **`OutboxRelay.relayPendingMessages()` é `synchronized`**, o que é correto e suficiente para uma
-  única instância da aplicação (o escopo desta demonstração), mas precisaria de captura em nível de
-  linha (ex.: `SELECT ... FOR UPDATE SKIP LOCKED`) ou um lock distribuído para escalar para
-  múltiplas instâncias sem publicar a mesma linha duas vezes.
 - **A `ViaCepDelegate` chama a API real do ViaCEP** no código de produção — de propósito, para que
   a demonstração seja de ponta a ponta com infraestrutura real; os testes a substituem por fakes, como descrito
   acima.
