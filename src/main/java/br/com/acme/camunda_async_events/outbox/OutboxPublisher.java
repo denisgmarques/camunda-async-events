@@ -28,9 +28,17 @@ class OutboxPublisher {
 	/**
 	 * Caminho da varredura agendada: recebe só o id, relê do banco antes de publicar. A
 	 * releitura importa aqui porque esse é o caminho que pode disputar a mesma linha com outra
-	 * JVM — o SELECT é o que permite detectar que a linha já sumiu (outra instância já publicou
-	 * e apagou) entre a consulta ampla do {@link OutboxRelay#relayPendingMessages()} e esta
-	 * chamada, e pular sem tentar de novo.
+	 * JVM (ou com o disparo de baixa latência, dentro desta mesma JVM) — o SELECT é o que
+	 * permite detectar que a linha já sumiu entre a consulta ampla do
+	 * {@link OutboxRelay#relayPendingMessages()} e esta chamada, e pular sem tentar de novo.
+	 *
+	 * <p>Apaga via {@link OutboxMessageRepository#deleteById(Long)} (o {@code DELETE} em JPQL
+	 * sobrescrito), <b>não</b> via {@code repository.delete(message)}: o delete por entidade do
+	 * Spring Data confere a contagem de linhas afetadas e lança {@code OptimisticLockException}
+	 * se a linha já não existir mais — o que aconteceria exatamente na corrida que este método
+	 * está preparado pra tolerar (outra chamada publicou e apagou a linha entre o SELECT acima e
+	 * este DELETE). O {@code deleteById} sobrescrito não faz essa checagem, então uma segunda
+	 * tentativa de apagar uma linha já apagada é um no-op silencioso, como deveria ser.
 	 */
 	@Transactional(propagation = Propagation.REQUIRES_NEW)
 	public void publish(Long outboxMessageId) {
@@ -41,7 +49,7 @@ class OutboxPublisher {
 		}
 
 		if (publishWithConfirm(message)) {
-			repository.delete(message);
+			repository.deleteById(outboxMessageId);
 		}
 		else {
 			log.warn("RabbitMQ nao confirmou a mensagem outbox {} a tempo; sera retentada", outboxMessageId);
