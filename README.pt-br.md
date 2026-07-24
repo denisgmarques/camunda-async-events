@@ -499,3 +499,7 @@ Ou rodar tudo, incluindo o [teste de integração de ponta a ponta](#teste-de-in
 - **A `ViaCepDelegate` chama a API real do ViaCEP** no código de produção — de propósito, para que
   a demonstração seja de ponta a ponta com infraestrutura real; os testes a substituem por fakes, como descrito
   acima.
+
+## Licença
+
+[MIT](LICENSE)

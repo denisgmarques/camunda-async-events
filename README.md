@@ -487,3 +487,7 @@ Or run everything, including the [end-to-end integration test](#end-to-end-integ
   without publishing the same row twice.
 - **`ViaCepDelegate` calls the real ViaCEP API** in production code — by design, so the demo is
   genuinely end-to-end; tests substitute it with fakes, as described above.
+
+## License
+
+[MIT](LICENSE)
