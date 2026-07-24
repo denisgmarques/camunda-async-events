@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                   xmlns:omgdc="http://www.omg.org/spec/DD/20100524/DC"
+                   xmlns:omgdi="http://www.omg.org/spec/DD/20100524/DI"
+                   xmlns:camunda="http://camunda.org/schema/1.0/bpmn"
+                   id="Definitions_CadastroCliente"
+                   targetNamespace="http://bpmn.io/schema/bpmn">
+
+  <bpmn:process id="cadastroClienteProcess" name="Cadastro de Cliente" isExecutable="true" camunda:historyTimeToLive="180">
+
+    <bpmn:startEvent id="StartEvent_1" name="Início do Cadastro">
+      <bpmn:outgoing>Flow_InicioParaViaCep</bpmn:outgoing>
+    </bpmn:startEvent>
+
+    <bpmn:callActivity id="CallActivity_ConsultarCep" name="Consultar CEP"
+                        calledElement="consultaCepProcess" camunda:asyncBefore="true">
+      <bpmn:extensionElements>
+        <camunda:in source="cep" target="cep" />
+        <camunda:out source="cep" target="cep" />
+        <camunda:out source="rua" target="rua" />
+        <camunda:out source="bairro" target="bairro" />
+        <camunda:out source="cidade" target="cidade" />
+        <camunda:out source="uf" target="uf" />
+        <camunda:out source="complemento" target="complemento" />
+        <camunda:out source="endereco_encontrado" target="endereco_encontrado" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_InicioParaViaCep</bpmn:incoming>
+      <bpmn:incoming>Flow_CorrecaoParaViaCep</bpmn:incoming>
+      <bpmn:outgoing>Flow_ViaCepParaAvaliar</bpmn:outgoing>
+    </bpmn:callActivity>
+
+    <bpmn:userTask id="Task_AvaliarCadastro" name="Avaliar Cadastro">
+      <bpmn:incoming>Flow_ViaCepParaAvaliar</bpmn:incoming>
+      <bpmn:outgoing>Flow_AvaliarParaGateway</bpmn:outgoing>
+    </bpmn:userTask>
+
+    <bpmn:exclusiveGateway id="Gateway_CadastroOk" name="Cadastro OK?" default="Flow_GatewayParaCorrecao">
+      <bpmn:incoming>Flow_AvaliarParaGateway</bpmn:incoming>
+      <bpmn:outgoing>Flow_GatewayParaFim</bpmn:outgoing>
+      <bpmn:outgoing>Flow_GatewayParaCorrecao</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:userTask id="Task_CorrigirDados" name="Corrigir Dados">
+      <bpmn:incoming>Flow_GatewayParaCorrecao</bpmn:incoming>
+      <bpmn:outgoing>Flow_CorrecaoParaViaCep</bpmn:outgoing>
+    </bpmn:userTask>
+
+    <bpmn:endEvent id="EndEvent_1" name="Cadastro Concluído">
+      <bpmn:incoming>Flow_GatewayParaFim</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:sequenceFlow id="Flow_InicioParaViaCep" sourceRef="StartEvent_1" targetRef="CallActivity_ConsultarCep" />
+    <bpmn:sequenceFlow id="Flow_ViaCepParaAvaliar" sourceRef="CallActivity_ConsultarCep" targetRef="Task_AvaliarCadastro" />
+    <bpmn:sequenceFlow id="Flow_AvaliarParaGateway" sourceRef="Task_AvaliarCadastro" targetRef="Gateway_CadastroOk" />
+
+    <bpmn:sequenceFlow id="Flow_GatewayParaFim" name="Sim" sourceRef="Gateway_CadastroOk" targetRef="EndEvent_1">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">${cadastro_ok == true}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+
+    <bpmn:sequenceFlow id="Flow_GatewayParaCorrecao" name="Não" sourceRef="Gateway_CadastroOk" targetRef="Task_CorrigirDados" />
+
+    <bpmn:sequenceFlow id="Flow_CorrecaoParaViaCep" sourceRef="Task_CorrigirDados" targetRef="CallActivity_ConsultarCep" />
+
+  </bpmn:process>
+
+  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="cadastroClienteProcess">
+
+      <bpmndi:BPMNShape id="StartEvent_1_di" bpmnElement="StartEvent_1">
+        <omgdc:Bounds x="152" y="200" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <omgdc:Bounds x="130" y="243" width="80" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="CallActivity_ConsultarCep_di" bpmnElement="CallActivity_ConsultarCep">
+        <omgdc:Bounds x="250" y="178" width="100" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Task_AvaliarCadastro_di" bpmnElement="Task_AvaliarCadastro">
+        <omgdc:Bounds x="410" y="178" width="100" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Gateway_CadastroOk_di" bpmnElement="Gateway_CadastroOk" isMarkerVisible="true">
+        <omgdc:Bounds x="565" y="193" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <omgdc:Bounds x="547" y="163" width="86" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="EndEvent_1_di" bpmnElement="EndEvent_1">
+        <omgdc:Bounds x="682" y="200" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <omgdc:Bounds x="659" y="243" width="82" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Task_CorrigirDados_di" bpmnElement="Task_CorrigirDados">
+        <omgdc:Bounds x="540" y="330" width="100" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNEdge id="Flow_InicioParaViaCep_di" bpmnElement="Flow_InicioParaViaCep">
+        <omgdi:waypoint x="188" y="218" />
+        <omgdi:waypoint x="250" y="218" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Flow_ViaCepParaAvaliar_di" bpmnElement="Flow_ViaCepParaAvaliar">
+        <omgdi:waypoint x="350" y="218" />
+        <omgdi:waypoint x="410" y="218" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Flow_AvaliarParaGateway_di" bpmnElement="Flow_AvaliarParaGateway">
+        <omgdi:waypoint x="510" y="218" />
+        <omgdi:waypoint x="565" y="218" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Flow_GatewayParaFim_di" bpmnElement="Flow_GatewayParaFim">
+        <omgdi:waypoint x="615" y="218" />
+        <omgdi:waypoint x="682" y="218" />
+        <bpmndi:BPMNLabel>
+          <omgdc:Bounds x="638" y="200" width="20" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Flow_GatewayParaCorrecao_di" bpmnElement="Flow_GatewayParaCorrecao">
+        <omgdi:waypoint x="590" y="243" />
+        <omgdi:waypoint x="590" y="330" />
+        <bpmndi:BPMNLabel>
+          <omgdc:Bounds x="596" y="284" width="24" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Flow_CorrecaoParaViaCep_di" bpmnElement="Flow_CorrecaoParaViaCep">
+        <omgdi:waypoint x="540" y="370" />
+        <omgdi:waypoint x="300" y="370" />
+        <omgdi:waypoint x="300" y="258" />
+      </bpmndi:BPMNEdge>
+
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+
+</bpmn:definitions>
